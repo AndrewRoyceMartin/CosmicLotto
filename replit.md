@@ -39,9 +39,12 @@ A Streamlit data analysis application that compares historical Powerball draw re
 
 ## Recent Changes
 - 2026-02-22: Initial build of all modules (Phases 1-7)
+- 2026-02-22: Added configurable draw time (default 20:30 Sydney) with DST-aware handling for date-only CSVs
 
 ## User Preferences
 - Australian Powerball format supported (7 main balls + powerball)
 - US Powerball format also supported (5 main balls + powerball)
 - Default location: Sydney, Australia
 - Default timezone: Australia/Sydney
+- Default draw time: 20:30 (8:30 PM) — configurable in sidebar
+- CSV date format: supports both full datetime and date-only (dd/mm/yyyy) with auto-applied draw time
