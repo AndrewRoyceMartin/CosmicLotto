@@ -125,6 +125,14 @@ def load_positions_df():
     return df
 
 
+def clear_computed_data():
+    conn = connect()
+    conn.execute("DELETE FROM planet_features")
+    conn.execute("DELETE FROM planet_positions")
+    conn.commit()
+    conn.close()
+
+
 def clear_all_data():
     conn = connect()
     conn.execute("DELETE FROM planet_features")

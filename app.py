@@ -7,7 +7,8 @@ import plotly.graph_objects as go
 from db import (
     init_db, get_draw_count, get_position_count, get_feature_count,
     get_draws_without_positions, get_draws_without_features,
-    load_draws_df, load_features_df, load_positions_df, clear_all_data,
+    load_draws_df, load_features_df, load_positions_df,
+    clear_all_data, clear_computed_data,
 )
 from ingest_powerball import ingest_from_csv
 from ephemeris import EphemerisEngine
@@ -75,6 +76,8 @@ with st.sidebar:
 
     if st.button("Clear all data", type="secondary"):
         clear_all_data()
+        for key in ["analysis_results", "forecast_results"]:
+            st.session_state.pop(key, None)
         st.rerun()
 
 
@@ -146,6 +149,20 @@ with tab_import:
                 except Exception as e:
                     st.error(f"Import failed: {e}")
 
+    if draw_count > 0:
+        st.divider()
+        with st.expander("Reset All Data"):
+            st.warning(
+                "This will delete all imported draws, computed positions, features, "
+                "and analysis results. Use this before reimporting a corrected CSV "
+                "or switching between AU/US formats."
+            )
+            if st.button("Clear All Data & Start Fresh", type="secondary", key="clear_all_import"):
+                clear_all_data()
+                for key in ["analysis_results", "forecast_results"]:
+                    st.session_state.pop(key, None)
+                st.rerun()
+
     st.divider()
 
     if draw_count > 0:
@@ -167,6 +184,18 @@ with tab_compute:
     **Location:** {location_name} ({latitude:.4f}, {longitude:.4f})
     | **Bin size:** {bin_size}° | **Aspect orb:** {orb_deg}°
     """)
+
+    if pos_count > 0 or feat_count > 0:
+        with st.expander("Reset Computed Data"):
+            st.warning(
+                "This will delete all computed planetary positions and alignment features, "
+                "but keep your imported draws. You can then recompute with different settings."
+            )
+            if st.button("Reset Positions & Features", type="secondary"):
+                clear_computed_data()
+                for key in ["analysis_results", "forecast_results"]:
+                    st.session_state.pop(key, None)
+                st.rerun()
 
     col_pos, col_feat = st.columns(2)
 
