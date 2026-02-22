@@ -396,6 +396,21 @@ with tab_forecast:
 
             analysis_results = st.session_state.get("analysis_results", None)
 
+            if analysis_results is None and feat_count > 0:
+                with st.spinner("Running correlation analysis first..."):
+                    try:
+                        draws_df = load_draws_df()
+                        feats_df = load_features_df()
+                        analysis_results = feature_number_scan(
+                            draws_df, feats_df,
+                            number_min=1, number_max=number_max,
+                            pb_max=pb_max, min_group_size=5,
+                        )
+                        if not analysis_results.empty:
+                            st.session_state["analysis_results"] = analysis_results
+                    except Exception as e:
+                        st.warning(f"Could not auto-run analysis: {e}")
+
             with st.spinner("Computing future planetary positions and scoring numbers..."):
                 try:
                     forecast_df = forecast_next_draws(
