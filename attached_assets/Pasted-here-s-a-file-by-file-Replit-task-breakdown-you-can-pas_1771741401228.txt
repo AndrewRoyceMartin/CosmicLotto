@@ -1,0 +1,611 @@
+here’s a file-by-file Replit task breakdown you can paste into the planner (and use as your build checklist).
+
+Replit File-by-File Build Plan
+
+Project: Powerball vs Planet Alignments Analyzer (Streamlit + SQLite + Skyfield)
+
+Project structure (target)
+powerball-planets/
+├─ app.py
+├─ db.py
+├─ ingest_powerball.py
+├─ ephemeris.py
+├─ features.py
+├─ analysis.py
+├─ model.py              # placeholder for V2 (backtesting/prediction)
+├─ utils.py              # optional helpers (datetime, validation, JSON)
+├─ requirements.txt
+├─ .streamlit/
+│  └─ config.toml        # optional Streamlit config
+└─ data/
+   └─ app.db
+1) requirements.txt
+Purpose
+
+Define dependencies for Replit environment.
+
+Tasks
+
+Add:
+
+streamlit
+
+pandas
+
+numpy
+
+scipy
+
+scikit-learn (for V2)
+
+skyfield
+
+python-dateutil
+
+tzdata
+
+requests
+
+beautifulsoup4
+
+lxml
+
+Done when
+
+Replit installs successfully and app can import packages without errors.
+
+2) db.py
+Purpose
+
+Centralized SQLite database access and schema management.
+
+Responsibilities
+
+Create DB connection helper
+
+Enable SQLite pragmas (WAL mode, FK support)
+
+Create/init schema
+
+Provide reusable query helpers (optional)
+
+Functions to implement
+
+connect() -> sqlite3.Connection
+
+init_db() -> None
+
+Tables
+draws
+
+Stores historical draw results + timestamps.
+
+draw_id (PK)
+
+draw_datetime_utc (TEXT, unique)
+
+draw_datetime_local (TEXT)
+
+game (TEXT)
+
+numbers_json (TEXT)
+
+powerball (INTEGER)
+
+planet_positions
+
+Stores computed planetary coordinates for each draw.
+
+draw_id (PK/FK to draws)
+
+location_name
+
+latitude
+
+longitude
+
+altitude_m
+
+positions_json
+
+planet_features
+
+Stores derived alignment features.
+
+draw_id (PK/FK to draws)
+
+features_json
+
+Done when
+
+Running app creates data/app.db
+
+Tables exist and can be queried
+
+3) ingest_powerball.py
+Purpose
+
+Import historical Powerball results into the DB (CSV first).
+
+Responsibilities
+
+Parse CSV file
+
+Validate expected columns
+
+Normalize timestamps
+
+Convert local timezone to UTC
+
+Insert rows into draws
+
+Functions to implement
+
+validate_csv_columns(df) -> list[str] (returns missing cols or raises)
+
+parse_draw_row(row, timezone_str="Australia/Sydney") -> dict
+
+upsert_draw(draw_datetime_local, numbers, powerball, game="Powerball")
+
+ingest_from_csv(path_or_filelike) -> dict (counts inserted/skipped/errors)
+
+CSV format (MVP)
+draw_datetime_local,n1,n2,n3,n4,n5,n6,n7,powerball
+2023-01-05T20:30:00+11:00,1,7,12,18,25,31,35,10
+Validation rules
+
+draw_datetime_local present
+
+n1..n7 integers in valid range
+
+no duplicate main numbers in a row
+
+powerball integer in valid range
+
+timezone-aware datetime preferred (or default to Sydney)
+
+Done when
+
+Uploading a CSV imports rows into draws
+
+Bad rows are reported cleanly (not silent failures)
+
+4) ephemeris.py
+Purpose
+
+Compute planetary positions for a given timestamp + location.
+
+Responsibilities
+
+Load Skyfield timescale and ephemeris file
+
+Compute topocentric (or geocentric if chosen later) planetary positions
+
+Return normalized position data
+
+Functions/classes to implement
+
+class EphemerisEngine
+
+__init__() (loads Skyfield data)
+
+compute_positions(dt_utc, lat, lon, altitude_m=0.0) -> dict
+
+Optional:
+
+compute_positions_bulk(draw_rows, lat, lon, altitude_m)
+
+Output shape example
+{
+  "mars": {"ecl_lon": 123.45, "ecl_lat": 1.23},
+  "venus": {"ecl_lon": 210.11, "ecl_lat": -0.44}
+}
+Important implementation notes
+
+Ensure dt_utc is timezone-aware UTC
+
+Normalize longitudes to 0..360
+
+Keep output JSON-serializable
+
+Done when
+
+A known test datetime produces position records for all selected planets
+
+5) features.py
+Purpose
+
+Convert planetary positions into statistical features.
+
+Responsibilities
+
+Define “alignment” mathematically
+
+Produce a flat feature dictionary suitable for analysis/modeling
+
+Feature families (MVP)
+
+Longitude bins (one-hot per planet)
+
+Pairwise aspects (binary flags for conjunction/square/trine/opposition etc.)
+
+Functions to implement
+
+angular_sep(a, b) -> float
+
+longitude_bin(lon_deg, bin_size=30) -> int
+
+build_features(positions, bin_size=30, aspects=None, orb_deg=3.0) -> dict
+
+to_json(d) -> str
+
+Optional V1.1 features
+
+Moon phase
+
+Planet retrograde flags
+
+Declination bins
+
+Sun/Moon inclusion toggle
+
+Done when
+
+One positions record can be converted into a reproducible feature dict
+
+Feature names are stable across rows
+
+6) analysis.py
+Purpose
+
+Run statistical tests on feature/number relationships.
+
+Responsibilities
+
+Build feature matrix X
+
+Build target matrix Y (drawn number indicators)
+
+Scan for associations
+
+Correct for multiple comparisons
+
+Return ranked results table
+
+Functions to implement
+
+build_feature_matrix(draws_df, feats_df)
+
+two_proportion_ztest(k1, n1, k0, n0) -> float
+
+benjamini_hochberg(pvals) -> np.ndarray
+
+feature_number_scan(draws_df, feats_df, number_min, number_max) -> pd.DataFrame
+
+Result columns (minimum)
+
+feature
+
+number
+
+n1, n0
+
+rate1, rate0
+
+lift
+
+p_value
+
+q_value_bh
+
+Optional V1.1 analysis functions
+
+permutation_test_scan(...)
+
+effect_size_ci(...)
+
+plot_top_results(...) (if you add charting)
+
+Done when
+
+App can produce a sorted table of candidate associations with corrected q-values
+
+7) app.py (main Streamlit app)
+Purpose
+
+UI workflow and orchestration of all modules.
+
+Responsibilities
+
+Initialize DB
+
+Sidebar controls for upload + location settings
+
+Trigger import / compute / analyze workflows
+
+Display status, previews, and results tables
+
+UI sections (recommended)
+Sidebar
+
+Location:
+
+name
+
+latitude
+
+longitude
+
+altitude
+
+CSV upload
+
+Buttons:
+
+Import CSV
+
+Compute positions + features
+
+Run analysis
+
+Main page
+
+Project title / description
+
+Draw data preview
+
+Coverage status (draws vs positions vs features)
+
+Analysis filters:
+
+q-value threshold
+
+min lift
+
+min sample size
+
+Results table
+
+“Notes / methodology” expander
+
+Functions to keep in app.py
+
+Thin orchestration helpers only:
+
+load_draws()
+
+load_features()
+
+compute_for_missing(...)
+
+Keep logic in modules (don’t let app.py become giant)
+
+Done when
+
+A non-technical user can complete the full workflow from UI only
+
+8) model.py (V2 placeholder)
+Purpose
+
+Future prediction/backtesting module (not needed to finish MVP, but create file now).
+
+Responsibilities (later)
+
+Time-based train/test split
+
+Baseline probability model (historical frequency only)
+
+Planet-feature model (e.g., logistic regression one-vs-rest)
+
+Backtest scoring
+
+Forecast future dates from future alignments
+
+Functions to stub now
+
+time_split(draws_df, test_fraction=0.2)
+
+fit_baseline_model(...)
+
+fit_planet_model(...)
+
+evaluate_models(...)
+
+forecast_for_datetime(...)
+
+Done when (later)
+
+You can compare planet model vs baseline on unseen draws
+
+9) utils.py (optional but useful)
+Purpose
+
+Common helpers to avoid duplication.
+
+Possible helpers
+
+timezone parsing/normalization
+
+JSON encode/decode wrappers
+
+range validation
+
+safe integer parsing
+
+logging helpers for Streamlit status
+
+Example functions
+
+ensure_tzaware_local(dt, timezone_str="Australia/Sydney")
+
+to_utc(dt_local)
+
+safe_int(x, default=None)
+
+Done when
+
+Repeated parsing/validation code disappears from other modules
+
+10) .streamlit/config.toml (optional)
+Purpose
+
+Minor UI/UX defaults in Replit.
+
+Example contents
+[server]
+headless = true
+runOnSave = true
+
+[theme]
+base = "light"
+Done when
+
+Streamlit behaves nicely in Replit preview
+
+Replit Planner Task Breakdown (copy/paste-friendly)
+Milestone 1 — Foundation
+
+Goal: app runs and DB is initialized
+Files: requirements.txt, db.py, app.py
+
+Tasks:
+
+Create Replit Python project and install dependencies
+
+Add db.py connection + schema initialization
+
+Create basic app.py Streamlit page and call init_db() on startup
+
+Confirm DB file and tables are created
+
+Milestone 2 — Import historical draws
+
+Goal: upload CSV and store draw history
+Files: ingest_powerball.py, app.py
+
+Tasks:
+
+Implement CSV validation and row parsing
+
+Add datetime normalization (Sydney local -> UTC)
+
+Insert/upsert draws into draws table
+
+Add upload UI + import button in Streamlit
+
+Show imported rows preview and counts (inserted/skipped/errors)
+
+Milestone 3 — Compute planetary positions
+
+Goal: attach planet coordinates to all draws
+Files: ephemeris.py, app.py
+
+Tasks:
+
+Load Skyfield ephemeris engine
+
+Compute planetary positions for each draw timestamp at selected location
+
+Store results in planet_positions table
+
+Add UI action “Compute planet positions” + progress/status output
+
+Milestone 4 — Feature engineering
+
+Goal: convert positions into alignment features
+Files: features.py, app.py
+
+Tasks:
+
+Implement longitude bins and pairwise aspect calculations
+
+Generate feature dictionaries for each draw
+
+Store in planet_features table
+
+Add coverage status (draws vs features complete)
+
+Milestone 5 — Statistical analysis (MVP complete)
+
+Goal: run feature-number frequency correlation scan
+Files: analysis.py, app.py
+
+Tasks:
+
+Build feature and target matrices from DB rows
+
+Run two-proportion tests for feature/number associations
+
+Apply Benjamini-Hochberg correction
+
+Display ranked results in Streamlit
+
+Add filters (q-value, lift, sample size)
+
+Milestone 6 — Hardening and usability
+
+Goal: make app reliable and easier to use
+Files: app.py, utils.py, optional all modules
+
+Tasks:
+
+Improve error handling and user messages
+
+Add validation feedback for bad CSV rows
+
+Add method notes / assumptions panel (draw time, timezone, feature definitions)
+
+Add export of analysis results to CSV (optional)
+
+Refactor duplicate code into utils.py
+
+Milestone 7 — V2 Backtesting + Future Forecast (later)
+
+Goal: test if any signal survives on unseen data
+Files: model.py, analysis.py, app.py
+
+Tasks:
+
+Implement time-based train/test split
+
+Add baseline model vs planet-feature model
+
+Add scoring metrics (Brier/log loss)
+
+Add future-date input and forecast probability shifts
+
+Display backtest comparison report
+
+Build Order Recommendation (fastest path)
+
+If you want the quickest route to a working demo in Replit, build in this exact order:
+
+db.py
+
+app.py (skeleton UI)
+
+ingest_powerball.py
+
+ephemeris.py
+
+features.py
+
+analysis.py
+
+polish app.py
+
+stub model.py
+
+Definition of Done (MVP)
+
+Your MVP is complete when you can:
+
+upload a CSV of historical draws
+
+compute planetary positions for every draw at a chosen location
+
+generate alignment features
+
+run a statistical scan with BH correction
+
+filter and inspect results in Streamlit
