@@ -1,7 +1,10 @@
 import pandas as pd
 import json
+import sqlite3
+from datetime import datetime, time
+from dateutil import tz, parser as dtparser
 from db import connect
-from utils import ensure_tzaware_local, to_utc, safe_int, format_utc_iso, format_local_iso
+from utils import safe_int, format_utc_iso, format_local_iso
 
 REQUIRED_COLUMNS = {"draw_datetime_local"}
 NUMBER_COLUMNS_7 = ["n1", "n2", "n3", "n4", "n5", "n6", "n7"]
@@ -14,6 +17,9 @@ MAIN_NUMBER_MAX_5 = 69
 PB_MIN = 1
 PB_MAX_7 = 20
 PB_MAX_5 = 26
+
+LOCAL_TZ = tz.gettz("Australia/Sydney")
+DEFAULT_DRAW_TIME = time(20, 30)
 
 
 def detect_format(df):
@@ -49,12 +55,31 @@ def validate_csv_columns(df):
     return fmt, num_cols, main_max, pb_max
 
 
-def parse_draw_row(row, num_cols, main_max, pb_max, timezone_str="Australia/Sydney"):
+def parse_draw_date(date_str, draw_time_local=None, timezone_str="Australia/Sydney"):
+    date_str = str(date_str).strip()
+    local_tz = tz.gettz(timezone_str)
+
+    try:
+        dt = dtparser.parse(date_str, dayfirst=True)
+    except Exception:
+        raise ValueError(f"Cannot parse date: {date_str}")
+
+    if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+        use_time = draw_time_local if draw_time_local else DEFAULT_DRAW_TIME
+        dt = datetime.combine(dt.date(), use_time)
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=local_tz)
+
+    return dt
+
+
+def parse_draw_row(row, num_cols, main_max, pb_max, timezone_str="Australia/Sydney", draw_time_local=None):
     errors = []
 
     try:
-        dt_local = ensure_tzaware_local(row["draw_datetime_local"], timezone_str)
-        dt_utc = to_utc(dt_local)
+        dt_local = parse_draw_date(row["draw_datetime_local"], draw_time_local, timezone_str)
+        dt_utc = dt_local.astimezone(tz.UTC)
     except Exception as e:
         errors.append(f"datetime error: {e}")
         return None, errors
@@ -89,7 +114,6 @@ def parse_draw_row(row, num_cols, main_max, pb_max, timezone_str="Australia/Sydn
 
 
 def upsert_draw(conn, draw_dict):
-    import sqlite3
     try:
         conn.execute("""
             INSERT INTO draws (draw_datetime_utc, draw_datetime_local, game, numbers_json, powerball)
@@ -100,7 +124,7 @@ def upsert_draw(conn, draw_dict):
         return "skipped"
 
 
-def ingest_from_csv(file_or_path, timezone_str="Australia/Sydney"):
+def ingest_from_csv(file_or_path, timezone_str="Australia/Sydney", draw_time_local=None):
     df = pd.read_csv(file_or_path)
     df.columns = [c.strip().lower() for c in df.columns]
     fmt, num_cols, main_max, pb_max = validate_csv_columns(df)
@@ -111,7 +135,7 @@ def ingest_from_csv(file_or_path, timezone_str="Australia/Sydney"):
     error_rows = []
 
     for idx, row in df.iterrows():
-        parsed, errs = parse_draw_row(row, num_cols, main_max, pb_max, timezone_str)
+        parsed, errs = parse_draw_row(row, num_cols, main_max, pb_max, timezone_str, draw_time_local)
         if parsed is None:
             error_rows.append({"row": idx + 2, "errors": errs})
             continue

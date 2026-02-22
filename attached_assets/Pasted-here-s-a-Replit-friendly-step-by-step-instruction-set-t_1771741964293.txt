@@ -1,0 +1,194 @@
+here’s a Replit-friendly step-by-step instruction set to make the draw time assumption 8:30 pm Sydney local time (DST-aware) and optionally make it configurable.
+
+Replit Instructions — Set Powerball Draw Time to Thursday 8:30pm (Sydney)
+Goal
+
+Update your importer so every CSV row with only a draw date is converted into a full timestamp using:
+
+20:30 (8:30pm)
+
+Australia/Sydney timezone
+
+automatic DST handling (AEST/AEDT)
+
+Option A (quickest): Hardcode 8:30pm Sydney in importer
+1) Open ingest_powerball.py
+
+Find the top section where timezone and default draw time are defined.
+
+2) Ensure these imports exist
+from datetime import datetime, time
+from dateutil import tz
+3) Set Sydney timezone + default draw time
+
+Add / confirm these lines:
+
+LOCAL_TZ = tz.gettz("Australia/Sydney")
+DEFAULT_DRAW_TIME = time(20, 30)  # 8:30pm Sydney local time
+4) Update the date parsing function
+
+Find your parse_draw_date(...) function and make sure it looks like this:
+
+def parse_draw_date(date_str: str):
+    """
+    CSV format is dd/mm/yyyy.
+    Attach default draw time (20:30) in Australia/Sydney timezone.
+    DST (AEST/AEDT) is handled automatically by the timezone.
+    """
+    date_str = str(date_str).strip()
+    dt_date = datetime.strptime(date_str, "%d/%m/%Y")
+    dt_local = datetime.combine(dt_date.date(), DEFAULT_DRAW_TIME)
+    dt_local = dt_local.replace(tzinfo=LOCAL_TZ)
+    return dt_local
+5) Confirm UTC conversion is happening on insert
+
+In upsert_draw(...), make sure this exists:
+
+dt_utc = dt_local.astimezone(tz.UTC)
+
+This ensures astronomy calculations use a clean UTC timestamp while preserving the Sydney local timestamp in the DB.
+
+Option B (better): Make draw time configurable from the app UI
+
+This lets you test 20:25 / 20:30 / 20:35 later for sensitivity.
+
+Step 1) Update ingest_powerball.py to accept a draw time parameter
+A. Change parse_draw_date(...)
+
+Replace it with:
+
+def parse_draw_date(date_str: str, draw_time_local: time = DEFAULT_DRAW_TIME):
+    """
+    CSV format is dd/mm/yyyy.
+    Attach provided local draw time in Australia/Sydney timezone.
+    """
+    date_str = str(date_str).strip()
+    dt_date = datetime.strptime(date_str, "%d/%m/%Y")
+    dt_local = datetime.combine(dt_date.date(), draw_time_local)
+    dt_local = dt_local.replace(tzinfo=LOCAL_TZ)
+    return dt_local
+B. Update ingest_from_csv(...) signature
+
+Change from:
+
+def ingest_from_csv(path_or_filelike):
+
+to:
+
+def ingest_from_csv(path_or_filelike, draw_time_local: time = DEFAULT_DRAW_TIME):
+C. Pass the time into parsing
+
+Inside the row loop, change:
+
+dt_local = parse_draw_date(row[DRAW_DATE_COL])
+
+to:
+
+dt_local = parse_draw_date(row[DRAW_DATE_COL], draw_time_local=draw_time_local)
+Step 2) Add a draw time input in app.py
+A. In the sidebar, add time controls
+
+Inside your sidebar section (near file upload), add:
+
+st.subheader("Draw Time Assumption")
+draw_time_str = st.text_input(
+    "Powerball draw time (Sydney local, HH:MM)",
+    value="20:30",
+    help="Used because the CSV includes draw dates but not exact timestamps."
+)
+B. Parse the time input safely
+
+Add this just before calling ingest_from_csv(...):
+
+from datetime import time
+
+try:
+    hh, mm = draw_time_str.strip().split(":")
+    draw_time_local = time(int(hh), int(mm))
+except Exception:
+    st.error("Invalid draw time format. Use HH:MM (e.g. 20:30).")
+    st.stop()
+C. Pass it into the importer
+
+Change your import call from:
+
+summary = ingest_from_csv(uploaded)
+
+to:
+
+summary = ingest_from_csv(uploaded, draw_time_local=draw_time_local)
+Step 3) Add a methodology note (recommended)
+
+In app.py, somewhere near the title or results section, add:
+
+st.info(
+    "Draw Time Assumption: Historical draws are timestamped at 8:30 pm "
+    "Australia/Sydney local time (Thursday night TV broadcast timing). "
+    "Daylight saving (AEST/AEDT) is handled automatically via the Sydney timezone."
+)
+
+This makes the assumption explicit and helps future debugging.
+
+Step 4) Re-import data if needed
+
+If you already imported rows using a different default time, you have two choices:
+
+Choice A (cleanest for now)
+
+Delete the database and re-import.
+
+In Replit file tree, delete: data/app.db
+
+Restart app
+
+Re-upload CSV
+
+Recompute planet positions/features
+
+Choice B (advanced)
+
+Write a reprocessing script to update draw timestamps and regenerate features.
+(Only worth it if you already have lots of additional data tied to the DB.)
+
+Recommendation: delete and re-import while you’re still building.
+
+Step 5) Recompute astronomy + features
+
+Because planetary positions depend on timestamp, after changing draw time you must:
+
+Re-import draws (if timestamps changed)
+
+Recompute planet positions
+
+Recompute features
+
+Re-run analysis
+
+Quick test checklist (in Replit)
+
+After making the change, test these:
+
+ CSV imports without errors
+
+ draw_datetime_local shows T20:30:00
+
+ timezone offset changes across DST dates (+10:00 / +11:00)
+
+ draw_datetime_utc is populated
+
+ planet positions compute successfully
+
+ analysis still runs
+
+Example of expected timestamp behavior
+
+For Sydney-local 8:30pm:
+
+Winter draw date → likely +10:00 (AEST)
+
+Summer draw date → likely +11:00 (AEDT)
+
+That’s exactly what you want.
+
+Paste-this into Replit Planner (mini task)
+Update CSV importer to assign a default Powerball draw timestamp of 20:30 (8:30pm) in Australia/Sydney local time for each draw date, with automatic DST handling (AEST/AEDT). Make draw time configurable in Streamlit sidebar (HH:MM), pass it into ingest_from_csv(), and document the draw time assumption in the UI. Re-import historical CSV and recompute planetary positions/features after the change.

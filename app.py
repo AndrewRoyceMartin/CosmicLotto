@@ -40,6 +40,15 @@ with st.sidebar:
 
     st.divider()
 
+    st.subheader("Draw Time Assumption")
+    draw_time_str = st.text_input(
+        "Default draw time (HH:MM, local)",
+        value="20:30",
+        help="Used when the CSV contains only dates without timestamps. Default is 8:30 PM Sydney local time."
+    )
+
+    st.divider()
+
     st.subheader("Feature Settings")
     bin_size = st.selectbox("Longitude bin size (degrees)", [30, 15, 10], index=0)
     orb_deg = st.slider("Aspect orb (degrees)", min_value=1.0, max_value=15.0, value=6.0, step=0.5)
@@ -85,9 +94,16 @@ with tab_import:
     **US Powerball (5 balls):**
     `draw_datetime_local, n1, n2, n3, n4, n5, powerball`
 
-    The datetime should include timezone info (e.g., `2023-01-05T20:30:00+11:00`).
-    If no timezone is specified, the draw timezone from the sidebar will be used.
+    The `draw_datetime_local` column can be either:
+    - A full datetime with timezone (e.g., `2023-01-05T20:30:00+11:00`)
+    - A date only (e.g., `05/01/2023` in dd/mm/yyyy format) — the configured draw time will be applied automatically
     """)
+
+    st.info(
+        f"Draw Time Assumption: Dates without timestamps will use "
+        f"**{draw_time_str}** in **{timezone_str}** timezone. "
+        f"DST (AEST/AEDT) is handled automatically."
+    )
 
     uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"])
 
@@ -101,10 +117,18 @@ with tab_import:
             st.error(f"Error reading CSV: {e}")
 
         if st.button("Import CSV", type="primary"):
+            from datetime import time as dt_time
+            try:
+                hh, mm = draw_time_str.strip().split(":")
+                parsed_draw_time = dt_time(int(hh), int(mm))
+            except Exception:
+                st.error("Invalid draw time format. Use HH:MM (e.g. 20:30).")
+                st.stop()
+
             with st.spinner("Importing draws..."):
                 try:
                     uploaded_file.seek(0)
-                    result = ingest_from_csv(uploaded_file, timezone_str=timezone_str)
+                    result = ingest_from_csv(uploaded_file, timezone_str=timezone_str, draw_time_local=parsed_draw_time)
                     st.success(
                         f"Import complete: {result['inserted']} inserted, "
                         f"{result['skipped']} skipped (duplicates), "
@@ -449,6 +473,15 @@ with tab_notes:
     raw p-values are corrected using the BH procedure to control the
     **false discovery rate** (FDR). The q-value represents the expected proportion
     of false positives among results at that threshold.
+
+    ### Draw Time Assumption
+
+    Historical draw CSVs often contain only the **date** without an exact timestamp.
+    When only a date is provided, this app assumes the draw occurred at the configured
+    draw time (default **20:30 / 8:30 PM**) in the selected timezone (default **Australia/Sydney**).
+    Daylight saving transitions (AEST/AEDT) are handled automatically by the timezone library.
+
+    You can adjust the draw time in the sidebar to test sensitivity (e.g., 20:25 vs 20:35).
 
     ### Important Caveats
 
