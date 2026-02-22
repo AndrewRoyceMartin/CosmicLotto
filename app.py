@@ -479,9 +479,18 @@ with tab_forecast:
                             st.markdown("**Powerball:** *No scored number available*")
 
                     with col_meta:
-                        st.caption(f"Main score sum: {main_score:.4f}")
-                        st.caption(f"PB score: {pb_score_val:.4f}")
-                        st.caption(f"Active features: {row['active_features_count']}")
+                        st.metric(
+                            "Main score sum", f"{main_score:.4f}",
+                            help="Sum of weighted scores for the top main ball numbers. Each active planetary feature contributes: lift × (1 − q-value). Higher values mean more historical correlations support these numbers."
+                        )
+                        st.metric(
+                            "PB score", f"{pb_score_val:.4f}",
+                            help="Weighted score for the top Powerball number. Calculated the same way as main scores: lift × (1 − q-value) for each active feature. Higher means stronger historical association."
+                        )
+                        st.metric(
+                            "Active features", int(row['active_features_count']),
+                            help="Number of planetary alignment features (longitude bins and pairwise aspects) that are active at this future draw's date/time. More active features means more data points feeding into the number scoring."
+                        )
 
                     st.caption(
                         "Forecast basis: This card is derived from future planetary positions at "
