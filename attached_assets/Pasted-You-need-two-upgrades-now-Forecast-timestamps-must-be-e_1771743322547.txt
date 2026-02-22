@@ -1,0 +1,309 @@
+You need two upgrades now:
+
+Forecast timestamps must be exactly the next Powerball draw datetimes (Thursday, 8:30pm Sydney local time, DST-aware), and planetary positions must be computed from those exact timestamps.
+
+A plain-English correlation summary that explains what (if anything) your analysis found.
+
+You’re right to push this now — otherwise the app can generate numbers without clearly proving the future ephemeris timestamps are correct or explaining the evidence.
+
+1) Ensure future planetary positions match actual draw dates/times
+What “correct” looks like
+
+For each forecasted draw, your app must:
+
+generate the next 10 Thursdays
+
+assign 20:30 local time
+
+use Australia/Sydney timezone
+
+convert to UTC for Skyfield calculation
+
+store/display both local and UTC timestamps in results
+
+That ensures the future planet positions are aligned with the draw times (including DST changes).
+
+✅ Patch forecast.py to make time alignment explicit and verifiable
+
+Add these helper checks and metadata fields.
+
+A) Add a draw-time validation helper
+
+This confirms each forecast datetime is Thursday 20:30 Sydney local.
+
+# forecast.py (add helper)
+def validate_draw_datetime_local(dt_local):
+    """
+    Validate forecast draw datetime is Thursday 20:30 in Sydney local time.
+    Returns (is_valid, issues_list).
+    """
+    issues = []
+    if dt_local.tzinfo is None:
+        issues.append("Datetime is not timezone-aware")
+    if dt_local.weekday() != 3:  # Thursday
+        issues.append(f"Not a Thursday (weekday={dt_local.weekday()})")
+    if not (dt_local.hour == 20 and dt_local.minute == 30):
+        issues.append(f"Time is not 20:30 (got {dt_local.hour:02d}:{dt_local.minute:02d})")
+    return (len(issues) == 0, issues)
+B) In forecast_next_draws(...), record timezone alignment info per draw
+
+Inside the forecast loop (where you build rows.append({...})), add validation and offset details.
+
+Replace your rows.append({...}) block with this version:
+
+        is_valid_dt, dt_issues = validate_draw_datetime_local(dt_local)
+        utc_offset_hours = dt_local.utcoffset().total_seconds() / 3600 if dt_local.utcoffset() else None
+
+        rows.append({
+            "draw_datetime_local": dt_local.isoformat(),
+            "draw_datetime_utc": dt_utc.isoformat(),
+            "weekday_local": dt_local.strftime("%A"),
+            "local_time": dt_local.strftime("%H:%M"),
+            "utc_offset_hours": utc_offset_hours,   # 10.0 (AEST) or 11.0 (AEDT)
+            "draw_time_alignment_ok": bool(is_valid_dt),
+            "draw_time_alignment_issues": "; ".join(dt_issues) if dt_issues else "",
+            "location_name": location_name,
+            "main_numbers": main_nums,
+            "powerball": pb,
+            "main_score_sum": float(scored_main.head(7)["score"].sum()),
+            "pb_score": float(scored_pb.head(1)["score"].iloc[0]),
+        })
+
+This gives you an auditable proof in the output that the forecast timestamps are aligned correctly.
+
+✅ Add an on-screen verification in app.py
+
+After generating forecast_df, add a quick check:
+
+# app.py (after forecast_df is created)
+if "draw_time_alignment_ok" in forecast_df.columns:
+    bad_rows = forecast_df[~forecast_df["draw_time_alignment_ok"]]
+    if len(bad_rows) == 0:
+        st.success("All future forecast timestamps are aligned to Thursday 20:30 Australia/Sydney (DST-aware).")
+    else:
+        st.error("Some forecast timestamps are not aligned correctly.")
+        st.dataframe(
+            bad_rows[[
+                "draw_datetime_local", "weekday_local", "local_time",
+                "utc_offset_hours", "draw_time_alignment_issues"
+            ]],
+            use_container_width=True
+        )
+Why this matters
+
+This directly addresses your requirement:
+
+Dates = next actual draw dates (Thursday cadence)
+
+Times = 8:30pm local
+
+Planet locations = computed from those exact timestamps, not approximate generic dates
+
+That’s exactly what you want.
+
+2) Add a plain-English correlation summary (what was identified, if any)
+
+This is an excellent addition. A raw table of feature / number / q-value / lift is not enough.
+
+You want the app to answer:
+
+Did we identify any statistically meaningful correlations?
+
+Which planetary alignments were involved?
+
+Which numbers appeared more/less often under those conditions?
+
+How strong was the effect (roughly)?
+
+Was this likely weak/noisy?
+
+✅ Add a summariser function to analysis.py
+
+This converts your results table into plain English.
+
+# analysis.py (add this function)
+def summarize_correlations_plain_english(
+    results_df,
+    top_n=10,
+    q_threshold=0.05,
+    min_abs_lift=0.005,
+    target_label="main numbers"
+):
+    """
+    Returns a plain-English summary string of identified correlations.
+    """
+    if results_df is None or len(results_df) == 0:
+        return f"No analysis results were available for {target_label}."
+
+    df = results_df.copy()
+
+    # Keep strongest statistically filtered rows
+    if "q_value_bh" in df.columns:
+        df = df[df["q_value_bh"] <= q_threshold]
+    if "lift" in df.columns:
+        df = df[df["lift"].abs() >= min_abs_lift]
+
+    if len(df) == 0:
+        return (
+            f"No statistically strong correlations were identified for {target_label} "
+            f"after multiple-comparisons correction (q ≤ {q_threshold}). "
+            "Any apparent relationships in the raw scan are likely weak or due to chance."
+        )
+
+    # Rank strongest by q-value then absolute lift
+    df = df.sort_values(
+        by=["q_value_bh", "lift"],
+        ascending=[True, False]
+    ).copy()
+
+    lines = []
+    lines.append(
+        f"The analysis identified {len(df)} statistically filtered correlation signals for {target_label} "
+        f"(q ≤ {q_threshold}, |lift| ≥ {min_abs_lift:.3f})."
+    )
+
+    top = df.head(top_n)
+    for _, row in top.iterrows():
+        feature = str(row.get("feature", "unknown feature"))
+
+        # target column can be 'number' or 'powerball'
+        if "number" in row.index and not pd.isna(row["number"]):
+            target_val = f"main number {int(row['number'])}"
+        elif "powerball" in row.index and not pd.isna(row["powerball"]):
+            target_val = f"Powerball {int(row['powerball'])}"
+        else:
+            target_val = "a target number"
+
+        rate1 = float(row.get("rate1", 0.0))
+        rate0 = float(row.get("rate0", 0.0))
+        lift = float(row.get("lift", 0.0))
+        qv = float(row.get("q_value_bh", 1.0))
+
+        direction = "more often" if lift > 0 else "less often"
+        lines.append(
+            f"- When **{feature}** was present, {target_val} appeared {direction} "
+            f"than baseline (feature-present rate {rate1:.3f} vs feature-absent rate {rate0:.3f}; "
+            f"lift {lift:+.3f}, q={qv:.4f})."
+        )
+
+    lines.append(
+        "These are statistical associations only and do not establish causation. "
+        "They should be validated with out-of-sample backtesting before using them as forecast rules."
+    )
+
+    return "\n".join(lines)
+Important import
+
+Because that function uses pd, make sure analysis.py has:
+
+import pandas as pd
+
+(You likely already do.)
+
+✅ Add summary display in app.py
+
+After running the historical scans (main_rules, pb_rules), show a plain-English summary.
+
+Add imports:
+
+from analysis import (
+    feature_number_scan,
+    feature_powerball_scan,
+    summarize_correlations_plain_english,
+)
+
+Then after the scans run:
+
+st.markdown("### Plain-English Summary of Correlations")
+
+main_summary = summarize_correlations_plain_english(
+    main_rules,
+    top_n=8,
+    q_threshold=q_max,      # or fixed 0.05 if you prefer
+    min_abs_lift=max(abs(min_lift), 0.001),
+    target_label="main numbers"
+)
+
+pb_summary = summarize_correlations_plain_english(
+    pb_rules,
+    top_n=5,
+    q_threshold=q_max,
+    min_abs_lift=max(abs(min_lift), 0.001),
+    target_label="Powerball numbers"
+)
+
+st.markdown("#### Main Numbers")
+st.write(main_summary)
+
+st.markdown("#### Powerball")
+st.write(pb_summary)
+3) Make feature names readable in plain English (optional but highly recommended)
+
+Right now summaries will say things like:
+
+aspect_mars_jupiter_trine
+
+lonbin_venus_07
+
+That’s technically accurate but not plain English.
+
+✅ Add a feature label formatter in analysis.py
+# analysis.py (add helper)
+def humanize_feature_name(feature_name: str) -> str:
+    if feature_name.startswith("aspect_"):
+        parts = feature_name.split("_")
+        # aspect_mars_jupiter_trine
+        if len(parts) >= 4:
+            _, p1, p2, aspect = parts[:4]
+            return f"{p1.title()}–{p2.title()} {aspect.title()} aspect"
+    if feature_name.startswith("lonbin_"):
+        parts = feature_name.split("_")
+        # lonbin_venus_07
+        if len(parts) >= 3:
+            _, planet, bin_idx = parts[:3]
+            try:
+                b = int(bin_idx)
+                start_deg = b * 30
+                end_deg = start_deg + 30
+                return f"{planet.title()} in ecliptic longitude bin {start_deg}°–{end_deg}°"
+            except Exception:
+                return f"{planet.title()} longitude bin {bin_idx}"
+    return feature_name
+
+Then in summarize_correlations_plain_english(...), replace:
+
+feature = str(row.get("feature", "unknown feature"))
+
+with:
+
+feature_raw = str(row.get("feature", "unknown feature"))
+feature = humanize_feature_name(feature_raw)
+
+This will make the summary much more readable.
+
+4) What your summary will look like (example)
+
+Once this is in place, the app will produce summaries like:
+
+“The analysis identified 6 statistically filtered correlation signals for main numbers (q ≤ 0.10, |lift| ≥ 0.005).”
+
+“When Mars–Jupiter Trine aspect was present, main number 14 appeared more often than baseline (0.212 vs 0.176; lift +0.036, q=0.0431).”
+
+“When Venus in ecliptic longitude bin 210°–240° was present, main number 31 appeared less often than baseline…”
+
+Or, if nothing real was found:
+
+“No statistically strong correlations were identified after multiple-comparisons correction…”
+
+That’s exactly the plain-English layer you want.
+
+5) Best practice for your forecast summaries
+
+When you show forecasted cards for the next 10 draws, also include a one-liner like:
+
+“Forecast basis: This card is derived from future planetary positions at Thursday 8:30pm Sydney local time and weighted historical feature associations (filtered by q-value and lift).”
+
+That makes the output understandable and traceable.
+
+Replit task prompt (copy/paste)
+Add two upgrades to the Streamlit app. First, make forecast timestamp alignment explicit and verifiable by ensuring each future forecast draw is generated for Thursday 20:30 Australia/Sydney local time (DST-aware), converted to UTC for planetary calculations, and shown with validation fields (weekday, local time, UTC offset, alignment_ok flag). Second, add a plain-English correlation summary generator that explains whether any statistically meaningful feature-to-number associations were found after BH correction, including top examples with rates, lift, and q-values, plus a clear “no strong correlations found” message when applicable.

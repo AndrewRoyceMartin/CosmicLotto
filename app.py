@@ -12,7 +12,8 @@ from db import (
 from ingest_powerball import ingest_from_csv
 from ephemeris import EphemerisEngine
 from features import generate_bulk, BIN_LABELS
-from analysis import feature_number_scan
+from analysis import feature_number_scan, summarize_correlations_plain_english, humanize_feature_name
+from forecast import forecast_next_draws
 
 st.set_page_config(
     page_title="Powerball Planet Correlation Analyzer",
@@ -77,9 +78,9 @@ with st.sidebar:
         st.rerun()
 
 
-tab_import, tab_compute, tab_analyze, tab_explore, tab_notes = st.tabs([
+tab_import, tab_compute, tab_analyze, tab_forecast, tab_explore, tab_notes = st.tabs([
     "1. Import Draws", "2. Compute Positions & Features",
-    "3. Correlation Analysis", "4. Explore Data", "5. Notes & Methodology"
+    "3. Correlation Analysis", "4. Forecast", "5. Explore Data", "6. Notes & Methodology"
 ])
 
 with tab_import:
@@ -272,9 +273,39 @@ with tab_analyze:
 
             st.subheader(f"Results: {len(filtered)} associations pass filters (of {len(results_df)} tested)")
 
+            st.markdown("### Plain-English Summary of Correlations")
+
+            main_results = results_df[results_df["number"].str.startswith("ball_")].copy() if not results_df.empty else pd.DataFrame()
+            pb_results = results_df[results_df["number"].str.startswith("pb_")].copy() if not results_df.empty else pd.DataFrame()
+
+            st.markdown("#### Main Numbers")
+            main_summary = summarize_correlations_plain_english(
+                main_results,
+                top_n=8,
+                q_threshold=q_threshold,
+                min_abs_lift=max(abs(min_lift), 0.001),
+                target_label="main numbers"
+            )
+            st.markdown(main_summary)
+
+            st.markdown("#### Powerball")
+            pb_summary = summarize_correlations_plain_english(
+                pb_results,
+                top_n=5,
+                q_threshold=q_threshold,
+                min_abs_lift=max(abs(min_lift), 0.001),
+                target_label="Powerball numbers"
+            )
+            st.markdown(pb_summary)
+
+            st.divider()
+
             if not filtered.empty:
+                st.subheader("Detailed Results Table")
+                display_filtered = filtered.copy()
+                display_filtered["feature_readable"] = display_filtered["feature"].apply(humanize_feature_name)
                 st.dataframe(
-                    filtered[["feature", "number", "n1", "n0", "rate1", "rate0",
+                    display_filtered[["feature_readable", "feature", "number", "n1", "n0", "rate1", "rate0",
                               "lift", "z_score", "p_value", "q_value_bh"]].round(6),
                     use_container_width=True,
                     height=400,
@@ -291,7 +322,7 @@ with tab_analyze:
                 st.subheader("Top Associations Visualization")
                 top_n = min(20, len(filtered))
                 top = filtered.head(top_n).copy()
-                top["label"] = top["feature"] + " → " + top["number"]
+                top["label"] = top["feature"].apply(humanize_feature_name) + " → " + top["number"]
                 top["neg_log_q"] = -np.log10(top["q_value_bh"].clip(lower=1e-300))
 
                 fig = px.bar(
@@ -305,6 +336,128 @@ with tab_analyze:
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No associations pass the current filter thresholds. Try relaxing filters.")
+
+
+with tab_forecast:
+    st.header("Forecast - Future Draw Analysis")
+
+    if feat_count == 0:
+        st.warning("Complete the analysis workflow first (Import → Compute → Analyze) before generating forecasts.")
+    else:
+        st.markdown("""
+        Generate forecasts for upcoming Powerball draws based on planetary positions
+        at the exact draw date/time. Each forecast uses **Thursday 20:30 Sydney local time**
+        (DST-aware) and computes planetary positions from those exact timestamps.
+        """)
+
+        col_fc1, col_fc2 = st.columns(2)
+        with col_fc1:
+            n_forecast = st.slider("Number of future draws", min_value=1, max_value=20, value=10)
+        with col_fc2:
+            main_count = 7 if number_max == 35 else 5
+
+        if st.button("Generate Forecast", type="primary"):
+            from datetime import time as dt_time
+            try:
+                hh, mm = draw_time_str.strip().split(":")
+                forecast_draw_time = dt_time(int(hh), int(mm))
+            except Exception:
+                st.error("Invalid draw time format. Use HH:MM (e.g. 20:30).")
+                st.stop()
+
+            analysis_results = st.session_state.get("analysis_results", None)
+
+            with st.spinner("Computing future planetary positions and scoring numbers..."):
+                try:
+                    forecast_df = forecast_next_draws(
+                        n_draws=n_forecast,
+                        lat=latitude,
+                        lon=longitude,
+                        altitude_m=altitude_m,
+                        location_name=location_name,
+                        timezone_str=timezone_str,
+                        draw_time=forecast_draw_time,
+                        analysis_results_df=analysis_results,
+                        number_max=number_max,
+                        pb_max=pb_max,
+                        main_count=main_count,
+                        bin_size=bin_size,
+                        orb_deg=orb_deg,
+                    )
+                    st.session_state["forecast_results"] = forecast_df
+                    st.success(f"Generated forecast for {len(forecast_df)} upcoming draws")
+                except Exception as e:
+                    st.error(f"Forecast failed: {e}")
+
+        if "forecast_results" in st.session_state:
+            forecast_df = st.session_state["forecast_results"]
+
+            if "draw_time_alignment_ok" in forecast_df.columns:
+                bad_rows = forecast_df[~forecast_df["draw_time_alignment_ok"]]
+                if len(bad_rows) == 0:
+                    st.success("All future forecast timestamps are aligned to Thursday 20:30 Australia/Sydney (DST-aware).")
+                else:
+                    st.error("Some forecast timestamps are not aligned correctly.")
+                    st.dataframe(
+                        bad_rows[["draw_datetime_local", "weekday_local", "local_time",
+                                  "utc_offset_hours", "draw_time_alignment_issues"]],
+                        use_container_width=True
+                    )
+
+            st.subheader("Forecast Draw Cards")
+
+            for idx, row in forecast_df.iterrows():
+                dt_display = row["draw_datetime_local"]
+                weekday = row["weekday_local"]
+                local_time = row["local_time"]
+                offset = row["utc_offset_hours"]
+                main_nums = row["main_numbers"]
+                pb = row["powerball"]
+                main_score = row["main_score_sum"]
+                pb_score_val = row["pb_score"]
+
+                offset_label = f"UTC+{offset:.0f}" if offset and offset >= 0 else f"UTC{offset:.0f}" if offset else ""
+
+                with st.container():
+                    st.markdown(f"#### {weekday} {dt_display[:10]} at {local_time} ({offset_label})")
+
+                    col_nums, col_meta = st.columns([2, 1])
+                    with col_nums:
+                        if main_nums:
+                            nums_display = " - ".join(str(n) for n in main_nums)
+                            st.markdown(f"**Main Numbers:** {nums_display}")
+                        else:
+                            st.markdown("**Main Numbers:** *No scored numbers available (run analysis first)*")
+
+                        if pb is not None:
+                            st.markdown(f"**Powerball:** {pb}")
+                        else:
+                            st.markdown("**Powerball:** *No scored number available*")
+
+                    with col_meta:
+                        st.caption(f"Main score sum: {main_score:.4f}")
+                        st.caption(f"PB score: {pb_score_val:.4f}")
+                        st.caption(f"Active features: {row['active_features_count']}")
+
+                    st.caption(
+                        "Forecast basis: This card is derived from future planetary positions at "
+                        f"{weekday} {local_time} {timezone_str} local time and weighted historical "
+                        "feature associations (filtered by q-value and lift)."
+                    )
+                    st.divider()
+
+            st.subheader("Timestamp Verification")
+            verify_cols = ["draw_datetime_local", "draw_datetime_utc", "weekday_local",
+                           "local_time", "utc_offset_hours", "draw_time_alignment_ok"]
+            st.dataframe(forecast_df[verify_cols], use_container_width=True)
+
+            csv_forecast = forecast_df.drop(columns=["positions"], errors="ignore").to_csv(index=False)
+            st.download_button(
+                "Download forecast as CSV",
+                csv_forecast,
+                file_name="powerball_forecast.csv",
+                mime="text/csv",
+            )
 
 
 with tab_explore:
@@ -486,6 +639,24 @@ with tab_notes:
 
     You can adjust the draw time in the sidebar to test sensitivity (e.g., 20:25 vs 20:35).
 
+    ### Forecast Mode
+
+    The forecast tab generates predictions for upcoming draws by:
+
+    1. Calculating the **next Thursday draw dates** at the configured draw time
+    2. Computing **planetary positions** at those exact future timestamps
+    3. Generating **alignment features** from those positions
+    4. **Scoring each ball number** based on which historical feature-number associations
+       are active at each future date
+
+    Each forecast card includes:
+    - **Timestamp verification** confirming the draw is on a Thursday at 20:30 local time
+    - **UTC offset** showing AEST (+10) or AEDT (+11) as appropriate
+    - **Score sums** indicating the aggregate strength of active correlations
+
+    Number scoring uses a weighted combination of historical lift values,
+    discounted by q-value confidence: `weight = lift * (1 - q_value)`.
+
     ### Important Caveats
 
     - Lottery draws are designed to be **random and independent**
@@ -493,4 +664,5 @@ with tab_notes:
     - This tool is for **educational and exploratory** purposes only
     - Surviving BH correction does not imply a causal relationship
     - Results should not be used for actual betting decisions
+    - Forecasts are **exploratory probability explorations**, not predictions
     """)

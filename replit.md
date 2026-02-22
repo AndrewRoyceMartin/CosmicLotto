@@ -12,7 +12,8 @@ A Streamlit data analysis application that compares historical Powerball draw re
 ├── ingest_powerball.py    # CSV import, validation, and draw ingestion
 ├── ephemeris.py           # Skyfield planetary position calculations
 ├── features.py            # Alignment feature engineering (bins, aspects)
-├── analysis.py            # Statistical correlation testing with BH correction
+├── analysis.py            # Statistical correlation testing with BH correction + plain-English summaries
+├── forecast.py            # Future draw forecast with planetary position scoring
 ├── model.py               # V2 placeholder for backtesting/prediction
 ├── utils.py               # Shared helper functions (timezone, validation, JSON)
 ├── .streamlit/config.toml # Streamlit server config
@@ -35,11 +36,16 @@ A Streamlit data analysis application that compares historical Powerball draw re
 2. Compute planetary positions via Skyfield
 3. Generate alignment features (longitude bins, pairwise aspects)
 4. Run two-proportion z-tests with Benjamini-Hochberg correction
-5. Filter and explore results
+5. View plain-English correlation summaries
+6. Generate forecasts for future draws based on active planetary features
+7. Filter and explore results
 
 ## Recent Changes
 - 2026-02-22: Initial build of all modules (Phases 1-7)
 - 2026-02-22: Added configurable draw time (default 20:30 Sydney) with DST-aware handling for date-only CSVs
+- 2026-02-22: Added forecast module (forecast.py) with Thursday 20:30 draw scheduling, DST-aware timestamps, and UTC offset tracking
+- 2026-02-22: Added plain-English correlation summaries (humanize_feature_name, summarize_correlations_plain_english in analysis.py)
+- 2026-02-22: Added Forecast tab to app.py with draw cards, timestamp verification, and number scoring
 
 ## User Preferences
 - Australian Powerball format supported (7 main balls + powerball)

@@ -130,3 +130,92 @@ def feature_number_scan(draws_df, feats_df, number_min=1, number_max=35, pb_max=
     results_df["q_value_bh"] = benjamini_hochberg(results_df["p_value"].values)
     results_df = results_df.sort_values("p_value").reset_index(drop=True)
     return results_df
+
+
+def humanize_feature_name(feature_name):
+    if feature_name.startswith("aspect_"):
+        parts = feature_name.split("_")
+        if len(parts) >= 4:
+            _, p1, p2, aspect = parts[0], parts[1], parts[2], parts[3]
+            return f"{p1.title()}\u2013{p2.title()} {aspect.title()} aspect"
+    if feature_name.startswith("bin_"):
+        parts = feature_name.split("_")
+        if len(parts) >= 3:
+            _, planet, bin_idx = parts[0], parts[1], parts[2]
+            try:
+                b = int(bin_idx)
+                start_deg = b * 30
+                end_deg = start_deg + 30
+                return f"{planet.title()} in longitude bin {start_deg}\u00b0\u2013{end_deg}\u00b0"
+            except Exception:
+                return f"{planet.title()} longitude bin {bin_idx}"
+    return feature_name
+
+
+def summarize_correlations_plain_english(
+    results_df,
+    top_n=10,
+    q_threshold=0.05,
+    min_abs_lift=0.005,
+    target_label="main numbers"
+):
+    if results_df is None or len(results_df) == 0:
+        return f"No analysis results were available for {target_label}."
+
+    df = results_df.copy()
+
+    if "q_value_bh" in df.columns:
+        df = df[df["q_value_bh"] <= q_threshold]
+    if "lift" in df.columns:
+        df = df[df["lift"].abs() >= min_abs_lift]
+
+    if len(df) == 0:
+        return (
+            f"No statistically strong correlations were identified for {target_label} "
+            f"after multiple-comparisons correction (q \u2264 {q_threshold}). "
+            "Any apparent relationships in the raw scan are likely weak or due to chance."
+        )
+
+    df = df.sort_values(
+        by=["q_value_bh", "lift"],
+        ascending=[True, False]
+    ).copy()
+
+    lines = []
+    lines.append(
+        f"The analysis identified **{len(df)}** statistically filtered correlation signals for {target_label} "
+        f"(q \u2264 {q_threshold}, |lift| \u2265 {min_abs_lift:.3f})."
+    )
+
+    top = df.head(top_n)
+    for _, row in top.iterrows():
+        feature_raw = str(row.get("feature", "unknown feature"))
+        feature = humanize_feature_name(feature_raw)
+
+        number_col = str(row.get("number", ""))
+        if number_col.startswith("ball_"):
+            target_val = f"main number {number_col.replace('ball_', '')}"
+        elif number_col.startswith("pb_"):
+            target_val = f"Powerball {number_col.replace('pb_', '')}"
+        else:
+            target_val = number_col
+
+        rate1 = float(row.get("rate1", 0.0))
+        rate0 = float(row.get("rate0", 0.0))
+        lift = float(row.get("lift", 0.0))
+        qv = float(row.get("q_value_bh", 1.0))
+
+        direction = "more often" if lift > 0 else "less often"
+        lines.append(
+            f"- When **{feature}** was present, {target_val} appeared {direction} "
+            f"than baseline (feature-present rate {rate1:.3f} vs feature-absent rate {rate0:.3f}; "
+            f"lift {lift:+.3f}, q={qv:.4f})."
+        )
+
+    lines.append("")
+    lines.append(
+        "*These are statistical associations only and do not establish causation. "
+        "They should be validated with out-of-sample backtesting before using them as forecast rules.*"
+    )
+
+    return "\n".join(lines)
