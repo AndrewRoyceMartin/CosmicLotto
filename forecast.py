@@ -1,4 +1,7 @@
+import itertools
 import json
+import numpy as np
+import pandas as pd
 from datetime import datetime, time, timedelta
 from dateutil import tz
 from ephemeris import EphemerisEngine
@@ -66,7 +69,7 @@ def compute_future_positions(draw_dates, lat, lon, altitude_m=0.0, bin_size=30, 
 
 def score_numbers_for_draw(features, analysis_results_df, number_max=35, pb_max=20):
     if analysis_results_df is None or analysis_results_df.empty:
-        return [], []
+        return pd.DataFrame(columns=["number", "score"]), pd.DataFrame(columns=["number", "score"])
 
     active_features = set(k for k, v in features.items() if v == 1)
 
@@ -93,7 +96,6 @@ def score_numbers_for_draw(features, analysis_results_df, number_max=35, pb_max=
             if 1 <= num <= pb_max:
                 pb_scores[num] = pb_scores.get(num, 0) + weight
 
-    import pandas as pd
     scored_main = pd.DataFrame([
         {"number": k, "score": v} for k, v in main_scores.items()
     ]).sort_values("score", ascending=False).reset_index(drop=True) if main_scores else pd.DataFrame(columns=["number", "score"])
@@ -103,6 +105,129 @@ def score_numbers_for_draw(features, analysis_results_df, number_max=35, pb_max=
     ]).sort_values("score", ascending=False).reset_index(drop=True) if pb_scores else pd.DataFrame(columns=["number", "score"])
 
     return scored_main, scored_pb
+
+
+def confidence_label_from_rank(rank_idx, total_count):
+    if total_count <= 0:
+        return "Unknown"
+    pct = (rank_idx + 1) / total_count
+    if pct <= 0.2:
+        return "Higher confidence"
+    elif pct <= 0.6:
+        return "Moderate confidence"
+    return "Lower confidence"
+
+
+def normalize_confidence_0_100(scores):
+    arr = np.array(scores, dtype=float)
+    if len(arr) == 0:
+        return []
+    smin = float(arr.min())
+    smax = float(arr.max())
+    if abs(smax - smin) < 1e-12:
+        return [50.0 for _ in arr]
+    return [float(100.0 * (s - smin) / (smax - smin)) for s in arr]
+
+
+def score_main_combination(combo_numbers, score_map):
+    nums = sorted(int(n) for n in combo_numbers)
+    main_score = float(sum(score_map.get(n, 0.0) for n in nums))
+
+    gaps = [nums[i+1] - nums[i] for i in range(len(nums)-1)]
+    spread_bonus = float((max(nums) - min(nums)) / 100.0)
+    clustering_penalty = 0.0
+    if any(g == 1 for g in gaps):
+        clustering_penalty = 0.05
+
+    combined_score = main_score + spread_bonus - clustering_penalty
+    return {
+        "main_numbers": nums,
+        "main_combo_score": combined_score,
+        "main_score_raw_sum": main_score,
+    }
+
+
+def generate_top_game_cards_for_draw(
+    scored_main_df,
+    scored_pb_df,
+    main_count=7,
+    top_n_games=10,
+    combo_pool_main_n=14,
+    pb_candidates_n=3,
+):
+    available = len(scored_main_df)
+    if available < main_count:
+        return pd.DataFrame()
+
+    effective_pool = min(combo_pool_main_n, available)
+    main_pool = scored_main_df.head(effective_pool)
+    pb_pool = scored_pb_df.head(pb_candidates_n) if len(scored_pb_df) > 0 else pd.DataFrame(columns=["number", "score"])
+
+    score_map = dict(zip(scored_main_df["number"].astype(int), scored_main_df["score"].astype(float)))
+    main_nums_pool = main_pool["number"].astype(int).tolist()
+
+    main_candidates = []
+    for combo in itertools.combinations(main_nums_pool, main_count):
+        main_candidates.append(score_main_combination(combo, score_map))
+
+    if not main_candidates:
+        return pd.DataFrame()
+
+    main_candidates_df = pd.DataFrame(main_candidates).sort_values(
+        "main_combo_score", ascending=False
+    )
+
+    pb_score_map = dict(zip(scored_pb_df["number"].astype(int), scored_pb_df["score"].astype(float))) if len(scored_pb_df) > 0 else {}
+
+    rows = []
+    top_main_for_pairing = main_candidates_df.head(max(200, top_n_games * 20))
+
+    if len(pb_pool) > 0:
+        for _, mrow in top_main_for_pairing.iterrows():
+            for _, pbrow in pb_pool.iterrows():
+                pb = int(pbrow["number"])
+                pb_score = float(pb_score_map.get(pb, 0.0))
+                game_score = float(mrow["main_combo_score"] + pb_score)
+
+                rows.append({
+                    "main_numbers": mrow["main_numbers"],
+                    "powerball": pb,
+                    "main_combo_score": float(mrow["main_combo_score"]),
+                    "pb_score": pb_score,
+                    "game_score": game_score,
+                })
+    else:
+        for _, mrow in top_main_for_pairing.iterrows():
+            rows.append({
+                "main_numbers": mrow["main_numbers"],
+                "powerball": None,
+                "main_combo_score": float(mrow["main_combo_score"]),
+                "pb_score": 0.0,
+                "game_score": float(mrow["main_combo_score"]),
+            })
+
+    games_df = pd.DataFrame(rows)
+    if len(games_df) == 0:
+        return games_df
+
+    games_df["main_key"] = games_df["main_numbers"].apply(lambda x: ",".join(map(str, x)))
+    games_df["game_key"] = games_df.apply(
+        lambda r: f"{r['main_key']}|{int(r['powerball']) if r['powerball'] is not None else 'none'}", axis=1
+    )
+    games_df = games_df.drop_duplicates(subset=["game_key"]).copy()
+
+    games_df = games_df.sort_values(
+        ["game_score", "main_combo_score", "pb_score"], ascending=False
+    ).reset_index(drop=True)
+
+    conf_0_100 = normalize_confidence_0_100(games_df["game_score"].tolist())
+    games_df["confidence_score_0_100"] = conf_0_100
+    games_df["confidence_label"] = [
+        confidence_label_from_rank(i, len(games_df)) for i in range(len(games_df))
+    ]
+    games_df["rank"] = np.arange(1, len(games_df) + 1)
+
+    return games_df.head(top_n_games).drop(columns=["main_key", "game_key"]).copy()
 
 
 def forecast_next_draws(
@@ -119,11 +244,14 @@ def forecast_next_draws(
     main_count=7,
     bin_size=30,
     orb_deg=6.0,
+    top_n_games_per_draw=10,
+    combo_pool_main_n=14,
+    pb_candidates_n=3,
 ):
     draw_dates = get_next_draw_dates(n_draws, draw_time, timezone_str)
     future_data = compute_future_positions(draw_dates, lat, lon, altitude_m, bin_size, orb_deg)
 
-    rows = []
+    all_rows = []
     for item in future_data:
         dt_local = item["dt_local"]
         dt_utc = item["dt_utc"]
@@ -133,39 +261,47 @@ def forecast_next_draws(
             features, analysis_results_df, number_max, pb_max
         )
 
-        if len(scored_main) >= main_count:
-            main_nums = sorted(scored_main.head(main_count)["number"].tolist())
-            main_score_sum = float(scored_main.head(main_count)["score"].sum())
-        else:
-            main_nums = sorted(scored_main["number"].tolist()) if len(scored_main) > 0 else []
-            main_score_sum = float(scored_main["score"].sum()) if len(scored_main) > 0 else 0.0
-
-        if len(scored_pb) > 0:
-            pb = int(scored_pb.iloc[0]["number"])
-            pb_score = float(scored_pb.iloc[0]["score"])
-        else:
-            pb = None
-            pb_score = 0.0
+        games_df = generate_top_game_cards_for_draw(
+            scored_main_df=scored_main,
+            scored_pb_df=scored_pb,
+            main_count=main_count,
+            top_n_games=top_n_games_per_draw,
+            combo_pool_main_n=combo_pool_main_n,
+            pb_candidates_n=pb_candidates_n,
+        )
 
         is_valid_dt, dt_issues = validate_draw_datetime_local(dt_local)
         utc_offset_hours = dt_local.utcoffset().total_seconds() / 3600 if dt_local.utcoffset() else None
+        active_feat_count = sum(1 for v in features.values() if v == 1)
 
-        rows.append({
-            "draw_datetime_local": dt_local.isoformat(),
-            "draw_datetime_utc": dt_utc.isoformat(),
-            "weekday_local": dt_local.strftime("%A"),
-            "local_time": dt_local.strftime("%H:%M"),
-            "utc_offset_hours": utc_offset_hours,
-            "draw_time_alignment_ok": bool(is_valid_dt),
-            "draw_time_alignment_issues": "; ".join(dt_issues) if dt_issues else "",
-            "location_name": location_name,
-            "main_numbers": main_nums,
-            "powerball": pb,
-            "main_score_sum": main_score_sum,
-            "pb_score": pb_score,
-            "positions": item["positions"],
-            "active_features_count": sum(1 for v in features.values() if v == 1),
-        })
+        if len(games_df) > 0:
+            for _, grow in games_df.iterrows():
+                all_rows.append({
+                    "draw_datetime_local": dt_local.isoformat(),
+                    "draw_datetime_utc": dt_utc.isoformat(),
+                    "weekday_local": dt_local.strftime("%A"),
+                    "local_time": dt_local.strftime("%H:%M"),
+                    "utc_offset_hours": utc_offset_hours,
+                    "draw_time_alignment_ok": bool(is_valid_dt),
+                    "draw_time_alignment_issues": "; ".join(dt_issues) if dt_issues else "",
+                    "location_name": location_name,
+                    "game_rank_for_draw": int(grow["rank"]),
+                    "confidence_score_0_100": float(grow["confidence_score_0_100"]),
+                    "confidence_label": str(grow["confidence_label"]),
+                    "main_numbers": grow["main_numbers"],
+                    "powerball": grow["powerball"],
+                    "game_score": float(grow["game_score"]),
+                    "main_combo_score": float(grow["main_combo_score"]),
+                    "pb_score": float(grow["pb_score"]),
+                    "active_features_count": active_feat_count,
+                    "insufficient_data": False,
+                })
 
-    import pandas as pd
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(all_rows)
+    if len(out):
+        out = out.sort_values(
+            ["draw_datetime_local", "game_rank_for_draw"],
+            ascending=[True, True]
+        ).reset_index(drop=True)
+
+    return out

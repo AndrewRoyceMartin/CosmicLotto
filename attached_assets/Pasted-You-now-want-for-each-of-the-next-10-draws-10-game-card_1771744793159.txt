@@ -1,0 +1,466 @@
+You now want for each of the next 10 draws:
+
+10 game cards (not just 1)
+
+each game card = 7 main numbers + 1 Powerball
+
+ranked by a confidence indicator
+
+based on the highest-rated combinations from your scoring model
+
+That means we need to move from “pick top 7 numbers” to combination generation + ranking.
+
+What changes conceptually
+Before
+
+Score each number individually
+
+Pick top 7
+
+Pick top Powerball
+
+Now
+
+Score each number individually
+
+Build many candidate 7-number combinations from top-ranked numbers
+
+Score each combination
+
+Pair with top Powerball choices
+
+Return the top 10 game cards by confidence
+
+Confidence indicator design (plain and practical)
+
+We’ll add two confidence levels:
+
+1) Game confidence score (numeric)
+
+A continuous score used to rank combinations.
+
+Example basis:
+
+sum of the selected numbers’ scores
+
+plus the selected Powerball score
+
+optional diversity penalty (to avoid almost identical cards)
+
+2) Confidence label (plain English)
+
+Derived from percentile/rank among generated candidates:
+
+Higher confidence
+
+Moderate confidence
+
+Lower confidence
+
+This is cleaner than pretending to give a real probability of winning.
+
+Important note on “10 highest rated combinations”
+
+The total number of 7-number combinations from 35 is huge, so we should not brute-force all combinations.
+
+Efficient approach (good for Replit)
+
+Generate combinations from the top N scored main numbers (e.g. top 14 or top 16), then rank them.
+
+Examples:
+
+top 14 numbers → C(14,7) = 3432 combos ✅ manageable
+
+top 16 numbers → C(16,7) = 11440 combos ✅ still manageable
+
+Then combine with top Powerball options (e.g. top 3–5 PB scores), score all, and keep the top 10.
+
+This is practical and gives you exactly what you want.
+
+✅ Patch forecast.py to generate top 10 games per draw with confidence
+
+Replace/extend your forecast.py with the following additions.
+
+1) Add combo-generation helpers to forecast.py
+# forecast.py (add imports near top)
+import itertools
+# forecast.py (add helper)
+def confidence_label_from_rank(rank_idx, total_count):
+    """
+    rank_idx is 0-based rank in sorted predictions.
+    """
+    if total_count <= 0:
+        return "Unknown"
+
+    pct = (rank_idx + 1) / total_count
+    if pct <= 0.2:
+        return "Higher confidence"
+    elif pct <= 0.6:
+        return "Moderate confidence"
+    return "Lower confidence"
+# forecast.py (add helper)
+def normalize_confidence_0_100(scores):
+    """
+    Convert arbitrary scores to a 0-100 relative confidence scale.
+    This is a ranking confidence indicator (not a probability of winning).
+    """
+    arr = np.array(scores, dtype=float)
+    if len(arr) == 0:
+        return []
+    smin = float(arr.min())
+    smax = float(arr.max())
+    if abs(smax - smin) < 1e-12:
+        return [50.0 for _ in arr]
+    return [float(100.0 * (s - smin) / (smax - smin)) for s in arr]
+# forecast.py (add helper)
+def score_main_combination(combo_numbers, scored_main_df):
+    """
+    Score a 7-number main combo using per-number scores.
+    combo_numbers: iterable of ints
+    scored_main_df columns expected: number, score, prob_like
+    """
+    score_map = dict(zip(scored_main_df["number"].astype(int), scored_main_df["score"].astype(float)))
+    prob_map = dict(zip(scored_main_df["number"].astype(int), scored_main_df["prob_like"].astype(float)))
+
+    nums = sorted(int(n) for n in combo_numbers)
+    main_score = float(sum(score_map.get(n, 0.0) for n in nums))
+
+    # Optional mild diversity regularizer: discourage too-tight clustering
+    gaps = [nums[i+1] - nums[i] for i in range(len(nums)-1)]
+    spread_bonus = float((max(nums) - min(nums)) / 100.0)  # tiny effect
+    clustering_penalty = 0.0
+    if any(g == 1 for g in gaps):
+        clustering_penalty = 0.05  # tiny penalty for consecutive runs (tuneable)
+
+    combined_score = main_score + spread_bonus - clustering_penalty
+
+    # A pseudo-confidence aggregate for the main set only
+    main_prob_like_avg = float(np.mean([prob_map.get(n, 0.5) for n in nums])) if nums else 0.5
+
+    return {
+        "main_numbers": nums,
+        "main_combo_score": combined_score,
+        "main_score_raw_sum": main_score,
+        "main_prob_like_avg": main_prob_like_avg,
+    }
+# forecast.py (add helper)
+def generate_top_game_cards_for_draw(
+    scored_main_df: pd.DataFrame,
+    scored_pb_df: pd.DataFrame,
+    top_n_games: int = 10,
+    combo_pool_main_n: int = 14,
+    pb_candidates_n: int = 3,
+):
+    """
+    Build and rank candidate game cards for one draw.
+    Strategy:
+    - use top N ranked main numbers to create combinations
+    - use top M ranked powerballs
+    - rank all game cards by combined score
+    """
+    if len(scored_main_df) < 7:
+        return pd.DataFrame()
+
+    main_pool = scored_main_df.head(combo_pool_main_n).copy()
+    pb_pool = scored_pb_df.head(pb_candidates_n).copy()
+
+    main_candidates = []
+    main_nums_pool = main_pool["number"].astype(int).tolist()
+
+    # Generate all 7-number combinations from main pool
+    for combo in itertools.combinations(main_nums_pool, 7):
+        main_candidates.append(score_main_combination(combo, scored_main_df))
+
+    if not main_candidates:
+        return pd.DataFrame()
+
+    main_candidates_df = pd.DataFrame(main_candidates).sort_values(
+        ["main_combo_score", "main_prob_like_avg"], ascending=False
+    )
+
+    # Pair top main combos with top PB candidates
+    pb_score_map = dict(zip(scored_pb_df["powerball"].astype(int), scored_pb_df["score"].astype(float)))
+    pb_prob_map = dict(zip(scored_pb_df["powerball"].astype(int), scored_pb_df["prob_like"].astype(float)))
+
+    rows = []
+    # To keep computation bounded on Replit, only pair top chunk of main combos with PB candidates
+    top_main_for_pairing = main_candidates_df.head(max(200, top_n_games * 20))
+
+    for _, mrow in top_main_for_pairing.iterrows():
+        for _, pbrow in pb_pool.iterrows():
+            pb = int(pbrow["powerball"])
+            pb_score = float(pb_score_map.get(pb, 0.0))
+            pb_prob_like = float(pb_prob_map.get(pb, 0.5))
+
+            game_score = float(mrow["main_combo_score"] + pb_score)
+
+            rows.append({
+                "main_numbers": mrow["main_numbers"],
+                "powerball": pb,
+                "main_combo_score": float(mrow["main_combo_score"]),
+                "pb_score": pb_score,
+                "game_score": game_score,
+                "main_prob_like_avg": float(mrow["main_prob_like_avg"]),
+                "pb_prob_like": pb_prob_like,
+            })
+
+    games_df = pd.DataFrame(rows)
+    if len(games_df) == 0:
+        return games_df
+
+    # Deduplicate exact same game cards if any
+    games_df["main_key"] = games_df["main_numbers"].apply(lambda x: ",".join(map(str, x)))
+    games_df["game_key"] = games_df.apply(lambda r: f"{r['main_key']}|{int(r['powerball'])}", axis=1)
+    games_df = games_df.drop_duplicates(subset=["game_key"]).copy()
+
+    games_df = games_df.sort_values(
+        ["game_score", "main_combo_score", "pb_score"], ascending=False
+    ).reset_index(drop=True)
+
+    # Add confidence indicators (relative ranking confidence)
+    conf_0_100 = normalize_confidence_0_100(games_df["game_score"].tolist())
+    games_df["confidence_score_0_100"] = conf_0_100
+    games_df["confidence_label"] = [
+        confidence_label_from_rank(i, len(games_df)) for i in range(len(games_df))
+    ]
+    games_df["rank"] = np.arange(1, len(games_df) + 1)
+
+    return games_df.head(top_n_games).copy()
+2) Replace the single-card output with 10 games per draw
+
+Update forecast_next_draws(...) so it returns one row per game, not one row per draw.
+
+Replace your current forecast_next_draws(...) function with this version:
+
+def forecast_next_draws(
+    draws_df: pd.DataFrame,
+    main_rules_df: pd.DataFrame,
+    powerball_rules_df: pd.DataFrame,
+    lat: float,
+    lon: float,
+    alt_m: float,
+    location_name: str = "Sydney NSW",
+    n_draws: int = 10,
+    q_max: float = 0.10,
+    min_lift: float = 0.0,
+    alpha: float = 2.0,
+    top_n_games_per_draw: int = 10,
+    combo_pool_main_n: int = 14,
+    pb_candidates_n: int = 3,
+):
+    """
+    Returns DataFrame of forecasted game cards for next n draws.
+    Produces multiple ranked game cards per draw (default = 10).
+    """
+    engine = EphemerisEngine()
+    future_dts = next_thursday_draws(n_draws=n_draws)
+
+    main_base = historical_main_frequencies(draws_df, number_min=1, number_max=35, modern_only=True)
+    pb_base = historical_powerball_frequencies(draws_df, pb_min=1, pb_max=20)
+
+    all_rows = []
+    for dt_local in future_dts:
+        dt_utc = dt_local.astimezone(tz.UTC)
+
+        # Compute planetary positions exactly at forecast draw timestamp
+        positions = engine.compute_positions(dt_utc, lat, lon, alt_m)
+        feats = build_features(positions, bin_size=30, orb_deg=3.0)
+
+        scored_main = score_numbers_from_rules(
+            active_features=feats,
+            rules_df=main_rules_df,
+            baseline_probs=main_base,
+            q_max=q_max,
+            min_lift=min_lift,
+            alpha=alpha,
+            target_col="number",
+        )
+
+        scored_pb = score_numbers_from_rules(
+            active_features=feats,
+            rules_df=powerball_rules_df,
+            baseline_probs=pb_base,
+            q_max=q_max,
+            min_lift=min_lift,
+            alpha=alpha,
+            target_col="powerball",
+        )
+
+        games_df = generate_top_game_cards_for_draw(
+            scored_main_df=scored_main,
+            scored_pb_df=scored_pb,
+            top_n_games=top_n_games_per_draw,
+            combo_pool_main_n=combo_pool_main_n,
+            pb_candidates_n=pb_candidates_n,
+        )
+
+        if len(games_df) == 0:
+            continue
+
+        # Validation metadata for timestamp alignment
+        is_valid_dt, dt_issues = validate_draw_datetime_local(dt_local)
+        utc_offset_hours = dt_local.utcoffset().total_seconds() / 3600 if dt_local.utcoffset() else None
+
+        for _, grow in games_df.iterrows():
+            all_rows.append({
+                "draw_datetime_local": dt_local.isoformat(),
+                "draw_datetime_utc": dt_utc.isoformat(),
+                "weekday_local": dt_local.strftime("%A"),
+                "local_time": dt_local.strftime("%H:%M"),
+                "utc_offset_hours": utc_offset_hours,  # 10.0 or 11.0
+                "draw_time_alignment_ok": bool(is_valid_dt),
+                "draw_time_alignment_issues": "; ".join(dt_issues) if dt_issues else "",
+                "location_name": location_name,
+
+                "game_rank_for_draw": int(grow["rank"]),
+                "confidence_score_0_100": float(grow["confidence_score_0_100"]),
+                "confidence_label": str(grow["confidence_label"]),
+
+                "main_numbers": grow["main_numbers"],
+                "powerball": int(grow["powerball"]),
+
+                "game_score": float(grow["game_score"]),
+                "main_combo_score": float(grow["main_combo_score"]),
+                "pb_score": float(grow["pb_score"]),
+                "main_prob_like_avg": float(grow["main_prob_like_avg"]),
+                "pb_prob_like": float(grow["pb_prob_like"]),
+            })
+
+    out = pd.DataFrame(all_rows)
+
+    if len(out):
+        out = out.sort_values(
+            ["draw_datetime_local", "game_rank_for_draw"],
+            ascending=[True, True]
+        ).reset_index(drop=True)
+
+    return out
+✅ Add confidence indicator + 10 games controls in app.py
+1) Update the forecast settings UI
+
+Add controls for number of games and combo search pool:
+
+# app.py (inside Forecast settings expander)
+top_n_games_per_draw = st.slider("Games per draw", 1, 20, 10, 1)
+combo_pool_main_n = st.slider(
+    "Main-number combo pool size (top N ranked numbers)",
+    10, 20, 14, 1,
+    help="Combinations are generated from the top N scored main numbers. Higher values increase variety and computation time."
+)
+pb_candidates_n = st.slider(
+    "Powerball candidate pool size",
+    1, 10, 3, 1,
+    help="Top-ranked Powerball values considered when building game combinations."
+)
+2) Pass new parameters into forecast_next_draws(...)
+
+Update the function call:
+
+forecast_df = forecast_next_draws(
+    draws_df=draws_for_forecast,   # recommended filtered dataset
+    main_rules_df=main_rules,
+    powerball_rules_df=pb_rules,
+    lat=lat,
+    lon=lon,
+    alt_m=alt_m,
+    location_name=location_name,
+    n_draws=10,
+    q_max=q_max,
+    min_lift=min_lift,
+    alpha=alpha,
+    top_n_games_per_draw=top_n_games_per_draw,
+    combo_pool_main_n=combo_pool_main_n,
+    pb_candidates_n=pb_candidates_n,
+)
+3) Display grouped results by draw with confidence
+
+Add a grouped display section:
+
+# app.py (after forecast_df is created and alignment check is shown)
+st.markdown("### Forecasted game cards (Top confidence combinations)")
+
+if len(forecast_df) == 0:
+    st.warning("No forecast cards were generated.")
+else:
+    # Table view
+    display_cols = [
+        "draw_datetime_local",
+        "game_rank_for_draw",
+        "confidence_score_0_100",
+        "confidence_label",
+        "main_numbers",
+        "powerball",
+        "game_score",
+    ]
+    st.dataframe(forecast_df[display_cols], use_container_width=True)
+
+    # Plain grouped cards
+    for draw_dt, group in forecast_df.groupby("draw_datetime_local", sort=True):
+        g0 = group.iloc[0]
+        st.markdown(
+            f"## {draw_dt}  \n"
+            f"**Validation:** {g0['weekday_local']} at {g0['local_time']} (UTC offset {g0['utc_offset_hours']:+.1f}) "
+            f"{'✅' if g0['draw_time_alignment_ok'] else '❌'}"
+        )
+
+        for _, r in group.sort_values("game_rank_for_draw").iterrows():
+            nums = ", ".join(str(n) for n in r["main_numbers"])
+            st.markdown(
+                f"- **Game {int(r['game_rank_for_draw'])}** | "
+                f"**Confidence:** {r['confidence_label']} ({r['confidence_score_0_100']:.1f}/100)  \n"
+                f"  Main: **{nums}**  \n"
+                f"  Powerball: **{int(r['powerball'])}**"
+            )
+✅ Plain English correlation summary (keep this with the forecast)
+
+You also asked for plain-English summary earlier — keep that section in the same forecast workflow so the app explains why it’s generating these combinations.
+
+Best placement:
+
+show summary before the forecasted cards
+
+then show the 10 ranked games for each draw
+
+That makes the output traceable.
+
+How the confidence indicator should be interpreted (important wording)
+
+Use this explanation in your UI:
+
+st.caption(
+    "Confidence scores are relative ranking indicators within the generated candidate combinations "
+    "for each forecast draw. They reflect the model’s internal scoring from historical feature associations "
+    "and are not probabilities of winning."
+)
+
+That’s accurate and avoids misleading interpretation.
+
+Performance notes for Replit
+
+If it gets slow, reduce:
+
+combo_pool_main_n from 14 → 12
+(C(12,7)=792 combos, much faster)
+
+pb_candidates_n from 3 → 2
+
+or cache the historical rule tables
+
+Recommended defaults
+
+For a good balance on Replit:
+
+Games per draw: 10
+
+Main combo pool: 14
+
+PB candidate pool: 3
+
+q_max: 0.10
+
+min_lift: 0.00 to 0.01
+
+alpha: 2.0
+
+Replit planner task (copy/paste)
+Upgrade the forecast module to generate 10 ranked game cards per future Powerball draw (next 1

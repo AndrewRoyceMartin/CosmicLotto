@@ -375,15 +375,32 @@ with tab_forecast:
     else:
         st.markdown("""
         Generate forecasts for upcoming Powerball draws based on planetary positions
-        at the exact draw date/time. Each forecast uses **Thursday 20:30 Sydney local time**
-        (DST-aware) and computes planetary positions from those exact timestamps.
+        at the exact draw date/time. Each draw produces **multiple ranked game cards**
+        built from the highest-scoring number combinations, with confidence indicators.
         """)
 
-        col_fc1, col_fc2 = st.columns(2)
+        col_fc1, col_fc2, col_fc3 = st.columns(3)
         with col_fc1:
             n_forecast = st.slider("Number of future draws", min_value=1, max_value=20, value=10)
         with col_fc2:
+            top_n_games_per_draw = st.slider("Games per draw", min_value=1, max_value=20, value=10)
+        with col_fc3:
             main_count = 7 if number_max == 35 else 5
+
+        with st.expander("Advanced Combo Settings"):
+            col_adv1, col_adv2 = st.columns(2)
+            with col_adv1:
+                combo_pool_main_n = st.slider(
+                    "Main-number combo pool size",
+                    min_value=main_count + 1, max_value=20, value=12, step=1,
+                    help="Combinations are generated from the top N scored main numbers. Higher values increase variety but slow down generation. 12 = 792 combos, 14 = 3432 combos."
+                )
+            with col_adv2:
+                pb_candidates_n = st.slider(
+                    "Powerball candidate pool size",
+                    min_value=1, max_value=10, value=3, step=1,
+                    help="Top-ranked Powerball values considered when building game combinations."
+                )
 
         if st.button("Generate Forecast", type="primary"):
             from datetime import time as dt_time
@@ -411,7 +428,7 @@ with tab_forecast:
                     except Exception as e:
                         st.warning(f"Could not auto-run analysis: {e}")
 
-            with st.spinner("Computing future planetary positions and scoring numbers..."):
+            with st.spinner("Computing future planetary positions and generating game cards..."):
                 try:
                     forecast_df = forecast_next_draws(
                         n_draws=n_forecast,
@@ -427,90 +444,112 @@ with tab_forecast:
                         main_count=main_count,
                         bin_size=bin_size,
                         orb_deg=orb_deg,
+                        top_n_games_per_draw=top_n_games_per_draw,
+                        combo_pool_main_n=combo_pool_main_n,
+                        pb_candidates_n=pb_candidates_n,
                     )
                     st.session_state["forecast_results"] = forecast_df
-                    st.success(f"Generated forecast for {len(forecast_df)} upcoming draws")
+                    n_draws_gen = forecast_df["draw_datetime_local"].nunique() if len(forecast_df) > 0 else 0
+                    st.success(f"Generated {len(forecast_df)} game cards across {n_draws_gen} draws")
                 except Exception as e:
                     st.error(f"Forecast failed: {e}")
 
         if "forecast_results" in st.session_state:
             forecast_df = st.session_state["forecast_results"]
 
-            if "draw_time_alignment_ok" in forecast_df.columns:
-                bad_rows = forecast_df[~forecast_df["draw_time_alignment_ok"]]
-                if len(bad_rows) == 0:
-                    st.success("All future forecast timestamps are aligned to Thursday 20:30 Australia/Sydney (DST-aware).")
-                else:
-                    st.error("Some forecast timestamps are not aligned correctly.")
-                    st.dataframe(
-                        bad_rows[["draw_datetime_local", "weekday_local", "local_time",
-                                  "utc_offset_hours", "draw_time_alignment_issues"]],
-                        use_container_width=True
+            if len(forecast_df) == 0:
+                st.warning("No forecast cards were generated.")
+            else:
+                if "draw_time_alignment_ok" in forecast_df.columns:
+                    bad_rows = forecast_df[~forecast_df["draw_time_alignment_ok"]]
+                    if len(bad_rows.drop_duplicates(subset=["draw_datetime_local"])) == 0:
+                        st.success("All forecast timestamps are aligned to Thursday 20:30 Australia/Sydney (DST-aware).")
+                    else:
+                        st.error("Some forecast timestamps are not aligned correctly.")
+
+                st.caption(
+                    "Confidence scores are relative ranking indicators within the generated candidate combinations "
+                    "for each forecast draw. They reflect the model's internal scoring from historical feature associations "
+                    "and are not probabilities of winning."
+                )
+
+                st.subheader("Forecasted Game Cards (Top Confidence Combinations)")
+
+                for draw_dt, group in forecast_df.groupby("draw_datetime_local", sort=True):
+                    g0 = group.iloc[0]
+                    weekday = g0["weekday_local"]
+                    local_time = g0["local_time"]
+                    offset = g0["utc_offset_hours"]
+                    offset_label = f"UTC+{offset:.0f}" if offset and offset >= 0 else f"UTC{offset:.0f}" if offset else ""
+                    alignment_ok = g0["draw_time_alignment_ok"]
+                    active_feat = g0["active_features_count"]
+
+                    st.markdown(
+                        f"### {weekday} {str(draw_dt)[:10]} at {local_time} ({offset_label}) "
+                        f"{'&check;' if alignment_ok else '&cross;'}"
                     )
+                    st.caption(f"Active planetary features: {active_feat}")
 
-            st.subheader("Forecast Draw Cards")
+                    has_data = "insufficient_data" not in group.columns or not group["insufficient_data"].any()
 
-            for idx, row in forecast_df.iterrows():
-                dt_display = row["draw_datetime_local"]
-                weekday = row["weekday_local"]
-                local_time = row["local_time"]
-                offset = row["utc_offset_hours"]
-                main_nums = row["main_numbers"]
-                pb = row["powerball"]
-                main_score = row["main_score_sum"]
-                pb_score_val = row["pb_score"]
+                    if not has_data:
+                        st.warning("Not enough scored numbers to generate game cards for this draw. Try running the analysis first or adjusting settings.")
+                    else:
+                        for _, r in group.sort_values("game_rank_for_draw").iterrows():
+                            rank = int(r["game_rank_for_draw"])
+                            main_nums = r["main_numbers"]
+                            pb = r["powerball"]
+                            conf_score = r["confidence_score_0_100"]
+                            conf_label = r["confidence_label"]
+                            game_score = r["game_score"]
 
-                offset_label = f"UTC+{offset:.0f}" if offset and offset >= 0 else f"UTC{offset:.0f}" if offset else ""
+                            if main_nums:
+                                nums_str = " - ".join(str(n) for n in main_nums)
+                            else:
+                                nums_str = "*No numbers available*"
 
-                with st.container():
-                    st.markdown(f"#### {weekday} {dt_display[:10]} at {local_time} ({offset_label})")
+                            pb_str = str(int(pb)) if pb is not None else "*N/A*"
 
-                    col_nums, col_meta = st.columns([2, 1])
-                    with col_nums:
-                        if main_nums:
-                            nums_display = " - ".join(str(n) for n in main_nums)
-                            st.markdown(f"**Main Numbers:** {nums_display}")
-                        else:
-                            st.markdown("**Main Numbers:** *No scored numbers available (run analysis first)*")
+                            col_rank, col_nums, col_conf = st.columns([1, 4, 2])
+                            with col_rank:
+                                st.markdown(f"**Game {rank}**")
+                            with col_nums:
+                                st.markdown(f"Main: **{nums_str}** | PB: **{pb_str}**")
+                            with col_conf:
+                                st.markdown(
+                                    f"**{conf_label}** ({conf_score:.1f}/100)",
+                                    help=f"Game score: {game_score:.4f}. This ranking reflects how strongly historical planetary correlations support this number combination relative to other candidates."
+                                )
 
-                        if pb is not None:
-                            st.markdown(f"**Powerball:** {pb}")
-                        else:
-                            st.markdown("**Powerball:** *No scored number available*")
-
-                    with col_meta:
-                        st.metric(
-                            "Main score sum", f"{main_score:.4f}",
-                            help="Sum of weighted scores for the top main ball numbers. Each active planetary feature contributes: lift × (1 − q-value). Higher values mean more historical correlations support these numbers."
-                        )
-                        st.metric(
-                            "PB score", f"{pb_score_val:.4f}",
-                            help="Weighted score for the top Powerball number. Calculated the same way as main scores: lift × (1 − q-value) for each active feature. Higher means stronger historical association."
-                        )
-                        st.metric(
-                            "Active features", int(row['active_features_count']),
-                            help="Number of planetary alignment features (longitude bins and pairwise aspects) that are active at this future draw's date/time. More active features means more data points feeding into the number scoring."
-                        )
-
-                    st.caption(
-                        "Forecast basis: This card is derived from future planetary positions at "
-                        f"{weekday} {local_time} {timezone_str} local time and weighted historical "
-                        "feature associations (filtered by q-value and lift)."
-                    )
                     st.divider()
 
-            st.subheader("Timestamp Verification")
-            verify_cols = ["draw_datetime_local", "draw_datetime_utc", "weekday_local",
-                           "local_time", "utc_offset_hours", "draw_time_alignment_ok"]
-            st.dataframe(forecast_df[verify_cols], use_container_width=True)
+                with st.expander("Full Results Table"):
+                    display_cols = [
+                        "draw_datetime_local", "game_rank_for_draw",
+                        "confidence_score_0_100", "confidence_label",
+                        "main_numbers", "powerball",
+                        "game_score", "main_combo_score", "pb_score",
+                    ]
+                    available_cols = [c for c in display_cols if c in forecast_df.columns]
+                    display_forecast = forecast_df[available_cols].copy()
+                    display_forecast["main_numbers"] = display_forecast["main_numbers"].apply(
+                        lambda x: ", ".join(str(n) for n in x) if x else ""
+                    )
+                    st.dataframe(display_forecast, use_container_width=True, height=400)
 
-            csv_forecast = forecast_df.drop(columns=["positions"], errors="ignore").to_csv(index=False)
-            st.download_button(
-                "Download forecast as CSV",
-                csv_forecast,
-                file_name="powerball_forecast.csv",
-                mime="text/csv",
-            )
+                with st.expander("Timestamp Verification"):
+                    verify_df = forecast_df.drop_duplicates(subset=["draw_datetime_local"])
+                    verify_cols = ["draw_datetime_local", "draw_datetime_utc", "weekday_local",
+                                   "local_time", "utc_offset_hours", "draw_time_alignment_ok"]
+                    st.dataframe(verify_df[verify_cols], use_container_width=True)
+
+                csv_forecast = forecast_df.to_csv(index=False)
+                st.download_button(
+                    "Download forecast as CSV",
+                    csv_forecast,
+                    file_name="powerball_forecast.csv",
+                    mime="text/csv",
+                )
 
 
 with tab_explore:

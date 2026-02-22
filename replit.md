@@ -46,6 +46,7 @@ A Streamlit data analysis application that compares historical Powerball draw re
 - 2026-02-22: Added forecast module (forecast.py) with Thursday 20:30 draw scheduling, DST-aware timestamps, and UTC offset tracking
 - 2026-02-22: Added plain-English correlation summaries (humanize_feature_name, summarize_correlations_plain_english in analysis.py)
 - 2026-02-22: Added Forecast tab to app.py with draw cards, timestamp verification, and number scoring
+- 2026-02-22: Upgraded forecast to generate 10 ranked game cards per draw with confidence indicators, combo generation from top-N scored numbers, and advanced settings (combo pool size, PB candidates)
 
 ## User Preferences
 - Australian Powerball format supported (7 main balls + powerball)
