@@ -1,12 +1,12 @@
 import pandas as pd
 import json
 import sqlite3
+import re
 from datetime import datetime, time
 from dateutil import tz, parser as dtparser
 from db import connect
 from utils import safe_int, format_utc_iso, format_local_iso
 
-REQUIRED_COLUMNS = {"draw_datetime_local"}
 NUMBER_COLUMNS_7 = ["n1", "n2", "n3", "n4", "n5", "n6", "n7"]
 NUMBER_COLUMNS_5 = ["n1", "n2", "n3", "n4", "n5"]
 PB_COLUMN = "powerball"
@@ -21,9 +21,95 @@ PB_MAX_5 = 26
 LOCAL_TZ = tz.gettz("Australia/Sydney")
 DEFAULT_DRAW_TIME = time(20, 30)
 
+DATE_COLUMN_ALIASES = [
+    "draw_datetime_local", "draw date", "date", "draw_date",
+    "drawdate", "datetime", "draw datetime", "draw_datetime",
+]
+
+PB_COLUMN_ALIASES = [
+    "powerball", "pb", "power ball", "power_ball",
+    "bonus", "bonus ball", "bonus_ball", "supplementary",
+]
+
+BALL_COLUMN_PATTERNS_ORDERED = [
+    (r"^(?:winning\s*)?(?:ball|number|num|n)\s*(\d+)$", None),
+    (r"^(?:main\s*)?(?:ball|number|num)\s*(\d+)$", None),
+    (r"^n(\d+)$", None),
+]
+
+
+def normalize_columns(df):
+    df.columns = [c.strip().lower() for c in df.columns]
+
+    col_map = {}
+    original_cols = list(df.columns)
+
+    date_col_found = False
+    for alias in DATE_COLUMN_ALIASES:
+        if alias in original_cols:
+            col_map[alias] = "draw_datetime_local"
+            date_col_found = True
+            break
+
+    if not date_col_found:
+        for col in original_cols:
+            if "date" in col or "time" in col or "draw" in col:
+                col_map[col] = "draw_datetime_local"
+                date_col_found = True
+                break
+
+    pb_col_found = False
+    for alias in PB_COLUMN_ALIASES:
+        if alias in original_cols:
+            col_map[alias] = "powerball"
+            pb_col_found = True
+            break
+
+    if not pb_col_found:
+        for col in original_cols:
+            if "power" in col or col == "pb":
+                col_map[col] = "powerball"
+                pb_col_found = True
+                break
+
+    ball_cols = {}
+    mapped_cols = set(col_map.keys())
+    for col in original_cols:
+        if col in mapped_cols:
+            continue
+        for pattern, _ in BALL_COLUMN_PATTERNS_ORDERED:
+            m = re.match(pattern, col)
+            if m:
+                idx = int(m.group(1))
+                ball_cols[idx] = col
+                break
+
+    if not ball_cols:
+        remaining = [c for c in original_cols if c not in mapped_cols
+                     and c != "powerball" and c not in col_map.values()]
+        numeric_candidates = []
+        for c in remaining:
+            try:
+                sample = df[c].dropna().head(20)
+                if sample.apply(lambda x: str(x).strip().isdigit()).all():
+                    numeric_candidates.append(c)
+            except Exception:
+                pass
+
+        for i, c in enumerate(numeric_candidates):
+            ball_cols[i + 1] = c
+
+    for idx in sorted(ball_cols.keys()):
+        col_map[ball_cols[idx]] = f"n{idx}"
+
+    if col_map:
+        df = df.rename(columns=col_map)
+
+    return df, col_map
+
 
 def detect_format(df):
-    cols = set(c.strip().lower() for c in df.columns)
+    cols = set(df.columns)
     has_7 = all(c in cols for c in NUMBER_COLUMNS_7)
     has_5 = all(c in cols for c in NUMBER_COLUMNS_5) and not has_7
     has_pb = PB_COLUMN in cols
@@ -38,20 +124,23 @@ def detect_format(df):
 
 
 def validate_csv_columns(df):
-    df.columns = [c.strip().lower() for c in df.columns]
     fmt, num_cols, main_max, pb_max = detect_format(df)
     if fmt is None:
         missing = []
         if "draw_datetime_local" not in df.columns:
-            missing.append("draw_datetime_local")
+            missing.append("draw_datetime_local (or 'Draw Date', 'Date')")
         if PB_COLUMN not in df.columns:
-            missing.append("powerball")
-        for c in NUMBER_COLUMNS_7:
-            if c not in df.columns:
-                missing.append(c)
-        if missing:
-            raise ValueError(f"Missing required columns: {', '.join(missing)}. "
-                             f"Expected columns: draw_datetime_local, n1..n7 (AU) or n1..n5 (US), powerball")
+            missing.append("powerball (or 'Powerball', 'PB')")
+
+        detected_n = [c for c in df.columns if re.match(r"^n\d+$", c)]
+        if len(detected_n) < 5:
+            missing.append("ball number columns (e.g., 'Ball 1'...'Ball 7' or 'n1'...'n7')")
+
+        actual_cols = ", ".join(df.columns.tolist()[:15])
+        raise ValueError(
+            f"Could not detect CSV format. Missing: {', '.join(missing)}. "
+            f"Detected columns: [{actual_cols}]"
+        )
     return fmt, num_cols, main_max, pb_max
 
 
@@ -126,7 +215,7 @@ def upsert_draw(conn, draw_dict):
 
 def ingest_from_csv(file_or_path, timezone_str="Australia/Sydney", draw_time_local=None):
     df = pd.read_csv(file_or_path)
-    df.columns = [c.strip().lower() for c in df.columns]
+    df, col_mapping = normalize_columns(df)
     fmt, num_cols, main_max, pb_max = validate_csv_columns(df)
 
     conn = connect()
@@ -154,4 +243,5 @@ def ingest_from_csv(file_or_path, timezone_str="Australia/Sydney", draw_time_loc
         "skipped": skipped,
         "errors": error_rows,
         "format": fmt,
+        "column_mapping": col_mapping,
     }

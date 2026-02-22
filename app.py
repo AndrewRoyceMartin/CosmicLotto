@@ -134,6 +134,9 @@ with tab_import:
                         f"{result['skipped']} skipped (duplicates), "
                         f"{len(result['errors'])} errors. Format: {result['format']}"
                     )
+                    if result.get("column_mapping"):
+                        mapping_str = ", ".join(f"'{k}' → '{v}'" for k, v in result["column_mapping"].items())
+                        st.info(f"Auto-detected columns: {mapping_str}")
                     if result["errors"]:
                         with st.expander(f"Show {len(result['errors'])} error(s)"):
                             for err in result["errors"][:50]:
