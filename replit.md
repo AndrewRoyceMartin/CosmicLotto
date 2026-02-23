@@ -14,7 +14,7 @@ A Streamlit data analysis application that compares historical Powerball draw re
 ├── features.py            # Alignment feature engineering (bins, aspects)
 ├── analysis.py            # Statistical correlation testing with BH correction + plain-English summaries
 ├── forecast.py            # Future draw forecast with planetary position scoring
-├── model.py               # V2 placeholder for backtesting/prediction
+├── model.py               # Walk-forward backtest: planet model vs frequency baseline
 ├── utils.py               # Shared helper functions (timezone, validation, JSON)
 ├── .streamlit/config.toml # Streamlit server config
 └── data/
@@ -38,7 +38,8 @@ A Streamlit data analysis application that compares historical Powerball draw re
 4. Run two-proportion z-tests with Benjamini-Hochberg correction
 5. View plain-English correlation summaries
 6. Generate forecasts for future draws based on active planetary features
-7. Filter and explore results
+7. Run walk-forward backtest comparing planet model vs frequency baseline
+8. Filter and explore results
 
 ## Recent Changes
 - 2026-02-22: Initial build of all modules (Phases 1-7)
@@ -47,6 +48,7 @@ A Streamlit data analysis application that compares historical Powerball draw re
 - 2026-02-22: Added plain-English correlation summaries (humanize_feature_name, summarize_correlations_plain_english in analysis.py)
 - 2026-02-22: Added Forecast tab to app.py with draw cards, timestamp verification, and number scoring
 - 2026-02-22: Upgraded forecast to generate 10 ranked game cards per draw with confidence indicators, combo generation from top-N scored numbers, and advanced settings (combo pool size, PB candidates)
+- 2026-02-23: Implemented model.py with walk-forward backtest (planet model vs frequency baseline), added feature_powerball_scan to analysis.py, added score_numbers_from_rules to forecast.py, added Backtest tab to app.py with progress bar, summary metrics, comparison table, and CSV download
 
 ## User Preferences
 - Australian Powerball format supported (7 main balls + powerball)

@@ -1,3 +1,44 @@
+What we’re adding now
+model.py (new real implementation)
+
+It will:
+
+Run a walk-forward backtest (time-based, no leakage)
+
+Compare:
+
+Planet-feature forecast model
+
+Baseline model (historical frequency only)
+
+Score outcomes on historical draws
+
+Produce a plain-English summary
+
+Backtest design (V1)
+
+For each test draw:
+
+Train on all prior draws only ✅
+
+Build feature rules from training set only ✅
+
+Generate forecasted top game cards for that draw date ✅
+
+Compare predicted cards to actual draw:
+
+main-number matches (0–7)
+
+Powerball match (0/1)
+
+total match score
+
+Compare to a baseline set of cards generated from frequency only
+
+This gives you a realistic “would this have helped?” framework.
+
+1) Create / replace model.py
+# model.py
 import json
 from datetime import datetime
 from dateutil import tz
@@ -26,26 +67,28 @@ def _main_count(numbers_json_str):
         return 0
 
 
-def filter_modern_draws(draws_df: pd.DataFrame, main_count=7):
+def filter_modern_draws(draws_df: pd.DataFrame):
+    """Current format proxy: exactly 7 main numbers."""
     d = draws_df.copy()
     d["main_count"] = d["numbers_json"].apply(_main_count)
-    d = d[d["main_count"] == main_count].copy()
+    d = d[d["main_count"] == 7].copy()
     d = d.sort_values("draw_datetime_utc").reset_index(drop=True)
     return d
 
 
 def build_feature_rows_for_draw_subset(draws_subset: pd.DataFrame, feats_df: pd.DataFrame):
+    """Keep only feature rows that match the draw subset."""
     ids = set(draws_subset["draw_id"].astype(int).tolist())
     f = feats_df[feats_df["draw_id"].astype(int).isin(ids)].copy()
     return f
 
 
-def _historical_main_baseline_probs(train_draws: pd.DataFrame, number_min=1, number_max=35, main_count=7):
+def _historical_main_baseline_probs(train_draws: pd.DataFrame, number_min=1, number_max=35):
     counts = {n: 0 for n in range(number_min, number_max + 1)}
     total = 0
     for _, row in train_draws.iterrows():
         nums = json.loads(row["numbers_json"])
-        if len(nums) != main_count:
+        if len(nums) != 7:
             continue
         total += 1
         for n in nums:
@@ -69,20 +112,20 @@ def _historical_pb_baseline_probs(train_draws: pd.DataFrame, pb_min=1, pb_max=20
     return {n: counts[n] / total for n in counts}
 
 
-def _baseline_scored_main(train_draws: pd.DataFrame, number_max=35, main_count=7):
-    base = _historical_main_baseline_probs(train_draws, number_max=number_max, main_count=main_count)
+def _baseline_scored_main(train_draws: pd.DataFrame):
+    base = _historical_main_baseline_probs(train_draws)
     rows = []
     for n, p in base.items():
         rows.append({"number": int(n), "score": float(p), "prob_like": float(p)})
     return pd.DataFrame(rows).sort_values(["score", "number"], ascending=[False, True]).reset_index(drop=True)
 
 
-def _baseline_scored_pb(train_draws: pd.DataFrame, pb_max=20):
-    base = _historical_pb_baseline_probs(train_draws, pb_max=pb_max)
+def _baseline_scored_pb(train_draws: pd.DataFrame):
+    base = _historical_pb_baseline_probs(train_draws)
     rows = []
     for n, p in base.items():
-        rows.append({"number": int(n), "score": float(p), "prob_like": float(p)})
-    return pd.DataFrame(rows).sort_values(["score", "number"], ascending=[False, True]).reset_index(drop=True)
+        rows.append({"powerball": int(n), "score": float(p), "prob_like": float(p)})
+    return pd.DataFrame(rows).sort_values(["score", "powerball"], ascending=[False, True]).reset_index(drop=True)
 
 
 def _score_prediction_vs_actual(pred_main, pred_pb, actual_main, actual_pb):
@@ -92,6 +135,7 @@ def _score_prediction_vs_actual(pred_main, pred_pb, actual_main, actual_pb):
     main_matches = len(pred_set.intersection(actual_set))
     pb_match = int(int(pred_pb) == int(actual_pb))
 
+    # Simple weighted score (tune later if you want)
     total_score = main_matches + (1.0 * pb_match)
 
     return {
@@ -101,25 +145,30 @@ def _score_prediction_vs_actual(pred_main, pred_pb, actual_main, actual_pb):
     }
 
 
-def _prepare_future_features_for_known_draw(test_row: pd.Series, lat: float, lon: float, alt_m: float, bin_size=30, orb_deg=6.0):
+def _prepare_future_features_for_known_draw(test_row: pd.Series, lat: float, lon: float, alt_m: float):
+    """
+    For backtesting, compute features at the exact historical draw timestamp (same path as future forecasts).
+    """
     engine = EphemerisEngine()
     dt_utc = _parse_iso_dt(test_row["draw_datetime_utc"])
     positions = engine.compute_positions(dt_utc, lat, lon, alt_m)
-    feats = build_features(positions, bin_size=bin_size, orb_deg=orb_deg)
+    feats = build_features(positions, bin_size=30, orb_deg=3.0)
     return feats
 
 
-def _build_planet_scored_tables(train_draws, train_feats, active_features, q_max=0.10, min_lift=0.0, alpha=2.0, number_max=35, pb_max=20):
-    main_rules = feature_number_scan(train_draws, train_feats, number_min=1, number_max=number_max)
-    pb_rules = feature_powerball_scan(train_draws, train_feats, pb_min=1, pb_max=pb_max)
+def _build_planet_scored_tables(train_draws, train_feats, active_features, q_max=0.10, min_lift=0.0, alpha=2.0):
+    # Build rules from TRAIN only
+    main_rules = feature_number_scan(train_draws, train_feats, number_min=1, number_max=35)
+    pb_rules = feature_powerball_scan(train_draws, train_feats, pb_min=1, pb_max=20)
 
     if len(main_rules):
         main_rules = main_rules[(main_rules["q_value_bh"] <= q_max) & (main_rules["lift"] >= min_lift)].copy()
     if len(pb_rules):
         pb_rules = pb_rules[(pb_rules["q_value_bh"] <= q_max) & (pb_rules["lift"] >= min_lift)].copy()
 
-    main_base = _historical_main_baseline_probs(train_draws, number_max=number_max)
-    pb_base = _historical_pb_baseline_probs(train_draws, pb_max=pb_max)
+    # Baselines from TRAIN only
+    main_base = _historical_main_baseline_probs(train_draws)
+    pb_base = _historical_pb_baseline_probs(train_draws)
 
     scored_main = score_numbers_from_rules(
         active_features=active_features,
@@ -144,8 +193,8 @@ def _build_planet_scored_tables(train_draws, train_feats, active_features, q_max
     return scored_main, scored_pb, main_rules, pb_rules
 
 
-def _build_baseline_only_scored_tables(train_draws, number_max=35, pb_max=20, main_count=7):
-    return _baseline_scored_main(train_draws, number_max=number_max, main_count=main_count), _baseline_scored_pb(train_draws, pb_max=pb_max)
+def _build_baseline_only_scored_tables(train_draws):
+    return _baseline_scored_main(train_draws), _baseline_scored_pb(train_draws)
 
 
 def walk_forward_backtest(
@@ -160,16 +209,17 @@ def walk_forward_backtest(
     min_lift: float = 0.0,
     alpha: float = 2.0,
     top_n_games_per_draw: int = 10,
-    combo_pool_main_n: int = 12,
+    combo_pool_main_n: int = 14,
     pb_candidates_n: int = 3,
-    progress_callback=None,
-    main_count: int = 7,
-    number_max: int = 35,
-    pb_max: int = 20,
-    bin_size: int = 30,
-    orb_deg: float = 6.0,
 ):
-    draws = filter_modern_draws(draws_df, main_count=main_count)
+    """
+    Walk-forward backtest:
+      - For each test draw, train on earlier draws only
+      - Compare planet-model vs baseline on exact historical outcome
+    Returns:
+      detail_df, summary_df
+    """
+    draws = filter_modern_draws(draws_df)
     feats = build_feature_rows_for_draw_subset(draws, feats_df)
 
     if len(draws) < (min_train_draws + 1):
@@ -177,45 +227,41 @@ def walk_forward_backtest(
             "error": f"Not enough modern-format draws. Need > {min_train_draws+1}, found {len(draws)}"
         }])
 
+    # Use last N draws as test window
     test_start_idx = max(min_train_draws, len(draws) - test_draws_count)
-    total_test = len(draws) - test_start_idx
     detail_rows = []
 
-    for step, i in enumerate(range(test_start_idx, len(draws))):
+    for i in range(test_start_idx, len(draws)):
         test_row = draws.iloc[i]
         train_draws = draws.iloc[:i].copy()
         train_feats = build_feature_rows_for_draw_subset(train_draws, feats)
 
-        if progress_callback:
-            progress_callback(step + 1, total_test)
-
         if len(train_draws) < min_train_draws or len(train_feats) == 0:
             continue
 
-        active_features = _prepare_future_features_for_known_draw(test_row, lat, lon, alt_m, bin_size=bin_size, orb_deg=orb_deg)
+        # Compute active features at exact historical draw timestamp (same forecast path)
+        active_features = _prepare_future_features_for_known_draw(test_row, lat, lon, alt_m)
 
+        # Planet model scored tables and rules from TRAIN only
         planet_scored_main, planet_scored_pb, main_rules_used, pb_rules_used = _build_planet_scored_tables(
-            train_draws, train_feats, active_features, q_max=q_max, min_lift=min_lift, alpha=alpha,
-            number_max=number_max, pb_max=pb_max
+            train_draws, train_feats, active_features, q_max=q_max, min_lift=min_lift, alpha=alpha
         )
 
-        base_scored_main, base_scored_pb = _build_baseline_only_scored_tables(
-            train_draws, number_max=number_max, pb_max=pb_max, main_count=main_count
-        )
+        # Baseline scored tables from TRAIN only
+        base_scored_main, base_scored_pb = _build_baseline_only_scored_tables(train_draws)
 
+        # Generate top cards for each model
         planet_cards = generate_top_game_cards_for_draw(
             scored_main_df=planet_scored_main,
             scored_pb_df=planet_scored_pb,
-            main_count=main_count,
             top_n_games=top_n_games_per_draw,
             combo_pool_main_n=combo_pool_main_n,
             pb_candidates_n=pb_candidates_n,
         )
 
         baseline_cards = generate_top_game_cards_for_draw(
-            scored_main_df=base_scored_main,
-            scored_pb_df=base_scored_pb,
-            main_count=main_count,
+            scored_main_df=base_scored_main.rename(columns={"number": "number"}),
+            scored_pb_df=base_scored_pb.rename(columns={"powerball": "powerball"}),
             top_n_games=top_n_games_per_draw,
             combo_pool_main_n=combo_pool_main_n,
             pb_candidates_n=pb_candidates_n,
@@ -224,6 +270,7 @@ def walk_forward_backtest(
         actual_main = json.loads(test_row["numbers_json"])
         actual_pb = int(test_row["powerball"])
 
+        # Score all cards and record best / avg for each model
         def eval_cards(cards_df, model_name):
             if cards_df is None or len(cards_df) == 0:
                 return {
@@ -275,6 +322,7 @@ def walk_forward_backtest(
         planet_eval = eval_cards(planet_cards, "planet")
         baseline_eval = eval_cards(baseline_cards, "baseline")
 
+        # Save one row per model for this test draw
         for ev in [planet_eval, baseline_eval]:
             detail_rows.append({
                 "test_draw_id": int(test_row["draw_id"]),
@@ -290,6 +338,7 @@ def walk_forward_backtest(
     if len(detail_df) == 0:
         return detail_df, pd.DataFrame([{"error": "No backtest rows generated"}])
 
+    # Summary by model
     summary_df = (
         detail_df
         .groupby("model", dropna=False)
@@ -307,6 +356,7 @@ def walk_forward_backtest(
         .reset_index()
     )
 
+    # Side-by-side comparison convenience metrics
     if set(summary_df["model"]) >= {"planet", "baseline"}:
         p = summary_df[summary_df["model"] == "planet"].iloc[0]
         b = summary_df[summary_df["model"] == "baseline"].iloc[0]
@@ -354,6 +404,7 @@ def summarize_backtest_plain_english(detail_df: pd.DataFrame, summary_obj):
         )
 
     if len(comp) > 0:
+        # Key comparison: total match score
         row = comp[comp["metric"] == "mean_best_total_match_score"]
         if len(row):
             d = float(row.iloc[0]["delta_planet_minus_baseline"])

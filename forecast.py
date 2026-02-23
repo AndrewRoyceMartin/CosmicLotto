@@ -67,6 +67,48 @@ def compute_future_positions(draw_dates, lat, lon, altitude_m=0.0, bin_size=30, 
     return results
 
 
+def score_numbers_from_rules(
+    active_features,
+    rules_df,
+    baseline_probs,
+    q_max=0.10,
+    min_lift=0.0,
+    alpha=2.0,
+    target_col="number",
+):
+    active_set = set(k for k, v in active_features.items() if v == 1)
+
+    scores = {}
+    for num, base_p in baseline_probs.items():
+        scores[int(num)] = float(base_p)
+
+    if rules_df is not None and len(rules_df) > 0:
+        for _, row in rules_df.iterrows():
+            feat_name = row["feature"]
+            if feat_name not in active_set:
+                continue
+            q_val = float(row.get("q_value_bh", 1.0))
+            lift = float(row.get("lift", 0.0))
+            if q_val > q_max or lift < min_lift:
+                continue
+
+            num_col = str(row.get("number", row.get(target_col, "")))
+            if num_col.startswith("ball_"):
+                num = int(num_col.replace("ball_", ""))
+            elif num_col.startswith("pb_"):
+                num = int(num_col.replace("pb_", ""))
+            else:
+                continue
+
+            weight = lift * max(0, 1 - q_val) * alpha
+            scores[num] = scores.get(num, 0.0) + weight
+
+    col_name = "number" if target_col == "number" else "number"
+    rows = [{"number": int(n), "score": float(s)} for n, s in scores.items()]
+    out = pd.DataFrame(rows).sort_values(["score", "number"], ascending=[False, True]).reset_index(drop=True)
+    return out
+
+
 def score_numbers_for_draw(features, analysis_results_df, number_max=35, pb_max=20):
     if analysis_results_df is None or analysis_results_df.empty:
         return pd.DataFrame(columns=["number", "score"]), pd.DataFrame(columns=["number", "score"])

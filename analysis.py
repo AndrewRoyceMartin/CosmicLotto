@@ -132,6 +132,65 @@ def feature_number_scan(draws_df, feats_df, number_min=1, number_max=35, pb_max=
     return results_df
 
 
+def feature_powerball_scan(draws_df, feats_df, pb_min=1, pb_max=20, min_group_size=5):
+    X, merged = build_feature_matrix(draws_df, feats_df)
+    if X.empty:
+        return pd.DataFrame()
+
+    merged_indexed = merged.set_index("draw_id")
+    aligned_draws = merged_indexed.loc[X.index]
+
+    indicators = {}
+    for num in range(pb_min, pb_max + 1):
+        col_name = f"pb_{num}"
+        indicators[col_name] = (aligned_draws["powerball"] == num).astype(int)
+    Y = pd.DataFrame(indicators)
+    Y.index = aligned_draws.index
+
+    results = []
+    feature_cols = [c for c in X.columns if X[c].nunique() > 1]
+
+    for feat in feature_cols:
+        mask1 = X[feat] == 1
+        mask0 = X[feat] == 0
+        n1 = mask1.sum()
+        n0 = mask0.sum()
+
+        if n1 < min_group_size or n0 < min_group_size:
+            continue
+
+        for num_col in Y.columns:
+            k1 = Y.loc[mask1.values, num_col].sum()
+            k0 = Y.loc[mask0.values, num_col].sum()
+            rate1 = k1 / n1 if n1 > 0 else 0
+            rate0 = k0 / n0 if n0 > 0 else 0
+            lift = (rate1 / rate0 - 1) if rate0 > 0 else 0
+
+            z, p_val = two_proportion_ztest(k1, n1, k0, n0)
+
+            results.append({
+                "feature": feat,
+                "number": num_col,
+                "n1": int(n1),
+                "n0": int(n0),
+                "k1": int(k1),
+                "k0": int(k0),
+                "rate1": round(rate1, 4),
+                "rate0": round(rate0, 4),
+                "lift": round(lift, 4),
+                "z_score": round(z, 4),
+                "p_value": p_val,
+            })
+
+    if not results:
+        return pd.DataFrame()
+
+    results_df = pd.DataFrame(results)
+    results_df["q_value_bh"] = benjamini_hochberg(results_df["p_value"].values)
+    results_df = results_df.sort_values("p_value").reset_index(drop=True)
+    return results_df
+
+
 def humanize_feature_name(feature_name):
     if feature_name.startswith("aspect_"):
         parts = feature_name.split("_")

@@ -15,6 +15,7 @@ from ephemeris import EphemerisEngine
 from features import generate_bulk, BIN_LABELS
 from analysis import feature_number_scan, summarize_correlations_plain_english, humanize_feature_name
 from forecast import forecast_next_draws
+from model import walk_forward_backtest, summarize_backtest_plain_english
 
 st.set_page_config(
     page_title="Powerball Planet Correlation Analyzer",
@@ -76,14 +77,14 @@ with st.sidebar:
 
     if st.button("Clear all data", type="secondary"):
         clear_all_data()
-        for key in ["analysis_results", "forecast_results"]:
+        for key in ["analysis_results", "forecast_results", "backtest_detail", "backtest_summary"]:
             st.session_state.pop(key, None)
         st.rerun()
 
 
-tab_import, tab_compute, tab_analyze, tab_forecast, tab_explore, tab_notes = st.tabs([
+tab_import, tab_compute, tab_analyze, tab_forecast, tab_backtest, tab_explore, tab_notes = st.tabs([
     "1. Import Draws", "2. Compute Positions & Features",
-    "3. Correlation Analysis", "4. Forecast", "5. Explore Data", "6. Notes & Methodology"
+    "3. Correlation Analysis", "4. Forecast", "5. Backtest", "6. Explore Data", "7. Notes & Methodology"
 ])
 
 with tab_import:
@@ -159,7 +160,7 @@ with tab_import:
             )
             if st.button("Clear All Data & Start Fresh", type="secondary", key="clear_all_import"):
                 clear_all_data()
-                for key in ["analysis_results", "forecast_results"]:
+                for key in ["analysis_results", "forecast_results", "backtest_detail", "backtest_summary"]:
                     st.session_state.pop(key, None)
                 st.rerun()
 
@@ -193,7 +194,7 @@ with tab_compute:
             )
             if st.button("Reset Positions & Features", type="secondary"):
                 clear_computed_data()
-                for key in ["analysis_results", "forecast_results"]:
+                for key in ["analysis_results", "forecast_results", "backtest_detail", "backtest_summary"]:
                     st.session_state.pop(key, None)
                 st.rerun()
 
@@ -548,6 +549,173 @@ with tab_forecast:
                     "Download forecast as CSV",
                     csv_forecast,
                     file_name="powerball_forecast.csv",
+                    mime="text/csv",
+                )
+
+
+with tab_backtest:
+    st.header("Walk-Forward Backtest")
+
+    if feat_count == 0:
+        st.warning("Complete the analysis workflow first (Import -> Compute -> Analyze) before running a backtest.")
+    else:
+        st.markdown("""
+        Test whether the planet-feature model would have helped predict past draws
+        compared to a baseline that uses only historical number frequencies.
+
+        For each test draw, the model is trained **only on earlier draws** (no lookahead),
+        then scored against the actual outcome.
+        """)
+
+        col_bt1, col_bt2, col_bt3 = st.columns(3)
+        with col_bt1:
+            bt_test_count = st.slider("Test draws (most recent N)", min_value=5, max_value=100, value=20, step=5,
+                                      help="Number of recent draws to test against. More draws = longer runtime.")
+        with col_bt2:
+            bt_min_train = st.slider("Minimum training draws", min_value=20, max_value=500, value=100, step=10,
+                                     help="Minimum number of draws required before making predictions.")
+        with col_bt3:
+            bt_games_per_draw = st.slider("Cards per draw", min_value=1, max_value=20, value=10,
+                                          help="Number of game cards generated per test draw.")
+
+        with st.expander("Advanced Backtest Settings"):
+            col_bta1, col_bta2, col_bta3 = st.columns(3)
+            with col_bta1:
+                bt_q_max = st.number_input("Max q-value", value=0.10, min_value=0.01, max_value=1.0, step=0.05, key="bt_q")
+            with col_bta2:
+                bt_combo_pool = st.slider("Combo pool size", min_value=8, max_value=20, value=12, step=1, key="bt_pool")
+            with col_bta3:
+                bt_pb_cands = st.slider("PB candidates", min_value=1, max_value=10, value=3, step=1, key="bt_pb")
+
+        if st.button("Run Backtest", type="primary"):
+            with st.spinner("Running walk-forward backtest... This may take several minutes."):
+                try:
+                    draws_df = load_draws_df()
+                    feats_df = load_features_df()
+
+                    progress_bar = st.progress(0, text="Backtesting draws...")
+
+                    def bt_progress(done, total):
+                        progress_bar.progress(done / total, text=f"Backtesting draw {done}/{total}...")
+
+                    main_count_bt = 7 if number_max == 35 else 5
+                    detail_df, summary_obj = walk_forward_backtest(
+                        draws_df=draws_df,
+                        feats_df=feats_df,
+                        lat=latitude,
+                        lon=longitude,
+                        alt_m=altitude_m,
+                        test_draws_count=bt_test_count,
+                        min_train_draws=bt_min_train,
+                        q_max=bt_q_max,
+                        top_n_games_per_draw=bt_games_per_draw,
+                        combo_pool_main_n=bt_combo_pool,
+                        pb_candidates_n=bt_pb_cands,
+                        progress_callback=bt_progress,
+                        main_count=main_count_bt,
+                        number_max=number_max,
+                        pb_max=pb_max,
+                        bin_size=bin_size,
+                        orb_deg=orb_deg,
+                    )
+                    progress_bar.progress(1.0, text="Done!")
+
+                    if isinstance(summary_obj, pd.DataFrame) and "error" in summary_obj.columns:
+                        st.error(summary_obj["error"].iloc[0])
+                    else:
+                        st.session_state["backtest_detail"] = detail_df
+                        st.session_state["backtest_summary"] = summary_obj
+                        st.success(f"Backtest complete: {detail_df['test_draw_id'].nunique()} draws tested")
+                except Exception as e:
+                    st.error(f"Backtest failed: {e}")
+
+        if "backtest_detail" in st.session_state and "backtest_summary" in st.session_state:
+            detail_df = st.session_state["backtest_detail"]
+            summary_obj = st.session_state["backtest_summary"]
+
+            if len(detail_df) > 0:
+                st.subheader("Plain-English Summary")
+                summary_text = summarize_backtest_plain_english(detail_df, summary_obj)
+                st.markdown(summary_text)
+
+                st.divider()
+
+                if isinstance(summary_obj, dict):
+                    by_model = summary_obj.get("by_model", pd.DataFrame())
+                    comparison = summary_obj.get("comparison", pd.DataFrame())
+
+                    if len(by_model) > 0:
+                        st.subheader("Model Comparison")
+
+                        if len(by_model) == 2:
+                            planet_row = by_model[by_model["model"] == "planet"]
+                            baseline_row = by_model[by_model["model"] == "baseline"]
+
+                            if len(planet_row) > 0 and len(baseline_row) > 0:
+                                p = planet_row.iloc[0]
+                                b = baseline_row.iloc[0]
+
+                                col_m1, col_m2, col_m3 = st.columns(3)
+                                with col_m1:
+                                    delta_main = float(p["mean_best_main_matches"] - b["mean_best_main_matches"])
+                                    st.metric(
+                                        "Avg Best Main Matches",
+                                        f"{float(p['mean_best_main_matches']):.2f}",
+                                        delta=f"{delta_main:+.2f} vs baseline",
+                                        help="Average number of main balls matched by the best card per draw (planet model)."
+                                    )
+                                with col_m2:
+                                    delta_pb = float(p["mean_best_powerball_match"] - b["mean_best_powerball_match"])
+                                    st.metric(
+                                        "Avg PB Hit Rate",
+                                        f"{float(p['mean_best_powerball_match']):.2f}",
+                                        delta=f"{delta_pb:+.2f} vs baseline",
+                                        help="Average Powerball match rate of the best card per draw (planet model)."
+                                    )
+                                with col_m3:
+                                    delta_total = float(p["mean_best_total_match_score"] - b["mean_best_total_match_score"])
+                                    st.metric(
+                                        "Avg Best Total Score",
+                                        f"{float(p['mean_best_total_match_score']):.2f}",
+                                        delta=f"{delta_total:+.2f} vs baseline",
+                                        help="Average total match score (main matches + PB match) for the best card per draw (planet model)."
+                                    )
+
+                        st.subheader("Summary by Model")
+                        st.dataframe(by_model.round(4), use_container_width=True)
+
+                    if len(comparison) > 0:
+                        st.subheader("Side-by-Side Comparison")
+                        st.dataframe(comparison.round(4), use_container_width=True)
+
+                st.divider()
+
+                with st.expander("Detailed Results (per draw, per model)"):
+                    display_detail = detail_df.copy()
+                    display_detail["actual_main_numbers"] = display_detail["actual_main_numbers"].apply(
+                        lambda x: ", ".join(str(n) for n in x) if isinstance(x, list) else str(x)
+                    )
+                    if "top_card_main_numbers" in display_detail.columns:
+                        display_detail["top_card_main_numbers"] = display_detail["top_card_main_numbers"].apply(
+                            lambda x: ", ".join(str(n) for n in x) if isinstance(x, list) else str(x)
+                        )
+
+                    show_cols = [
+                        "test_draw_datetime_local", "model",
+                        "actual_main_numbers", "actual_powerball",
+                        "best_main_matches", "best_powerball_match", "best_total_match_score",
+                        "avg_main_matches", "avg_total_match_score",
+                        "top_card_main_numbers", "top_card_powerball",
+                        "rule_count_main", "rule_count_powerball",
+                    ]
+                    available_show = [c for c in show_cols if c in display_detail.columns]
+                    st.dataframe(display_detail[available_show].round(4), use_container_width=True, height=500)
+
+                csv_bt = detail_df.to_csv(index=False)
+                st.download_button(
+                    "Download backtest results as CSV",
+                    csv_bt,
+                    file_name="backtest_results.csv",
                     mime="text/csv",
                 )
 

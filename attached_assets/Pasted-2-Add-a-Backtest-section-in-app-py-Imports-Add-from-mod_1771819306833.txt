@@ -1,0 +1,83 @@
+2) Add a Backtest section in app.py
+Imports
+
+Add:
+
+from model import walk_forward_backtest, summarize_backtest_plain_english
+UI block (add below your forecast section or in a new expander)
+st.subheader("Backtest (walk-forward validation)")
+
+with st.expander("Backtest settings", expanded=False):
+    bt_test_draws = st.slider("Test window (historical draws)", 10, 100, 30, 5)
+    bt_min_train = st.slider("Minimum training draws", 50, 500, 100, 10)
+    bt_top_games = st.slider("Generated games per test draw", 1, 20, 10, 1)
+
+if st.button("Run walk-forward backtest"):
+    if len(feats_df) == 0:
+        st.error("No planetary features found. Compute features first.")
+    else:
+        with st.spinner("Running walk-forward backtest..."):
+            bt_detail_df, bt_summary = walk_forward_backtest(
+                draws_df=draws,
+                feats_df=feats_df,
+                lat=lat,
+                lon=lon,
+                alt_m=alt_m,
+                test_draws_count=bt_test_draws,
+                min_train_draws=bt_min_train,
+                q_max=q_max,
+                min_lift=min_lift,
+                alpha=alpha,
+                top_n_games_per_draw=bt_top_games,
+                combo_pool_main_n=combo_pool_main_n,
+                pb_candidates_n=pb_candidates_n,
+            )
+
+        if len(bt_detail_df) == 0:
+            st.warning("No backtest rows generated.")
+            if isinstance(bt_summary, dict):
+                st.write(bt_summary.get("by_model", ""))
+            else:
+                st.write(bt_summary)
+        else:
+            st.success("Backtest complete.")
+
+            # Plain-English summary
+            st.markdown("### Plain-English Backtest Summary")
+            st.write(summarize_backtest_plain_english(bt_detail_df, bt_summary))
+
+            # Summary tables
+            if isinstance(bt_summary, dict):
+                st.markdown("### Summary by Model")
+                st.dataframe(bt_summary.get("by_model", pd.DataFrame()), use_container_width=True)
+
+                if len(bt_summary.get("comparison", pd.DataFrame())):
+                    st.markdown("### Planet vs Baseline Comparison")
+                    st.dataframe(bt_summary["comparison"], use_container_width=True)
+
+            st.markdown("### Detailed Results (per test draw, per model)")
+            st.dataframe(bt_detail_df, use_container_width=True)
+3) Why this is the right next step
+
+This immediately answers your key question:
+
+Are the planet-based forecasts actually doing better than a plain historical-frequency baseline?
+
+If yes → keep refining.
+If no → still useful, and you can pivot to visualisation/research mode confidently.
+
+4) Recommended next patch after this
+
+Once this runs, the next upgrade should be:
+
+Confidence calibration
+
+Use backtest outcomes to map your confidence_score_0_100 into evidence-based bands:
+
+80–100 score historically produced X average matches
+
+60–79 produced Y
+
+etc.
+
+That will make your confidence labels much more meaningful.
